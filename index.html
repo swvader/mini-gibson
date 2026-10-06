@@ -51,6 +51,16 @@ body.convo #convoGlow{opacity:.55}
 body.convo[data-busy=listening] #convoGlow{opacity:1}
 #status{font:12px ui-monospace,Menlo,monospace;color:#ff9a8a;white-space:pre-wrap;background:#140101;border-radius:6px;padding:8px;min-height:2.4em}
 </style>
+<script>
+/* GitHub Pages can't send COOP/COEP headers, so sw.js adds them. The first visit reloads once when the worker takes over;
+   then crossOriginIsolated is true and the voices can use multi-threaded WASM. */
+if ('serviceWorker' in navigator && location.protocol !== 'file:') {
+  navigator.serviceWorker.register('sw.js').catch(() => {});
+  navigator.serviceWorker.addEventListener('controllerchange', () => {
+    if (!self.crossOriginIsolated && !sessionStorage.getItem('gibson.coiReload') && !window.GIBSON_STARTED) { sessionStorage.setItem('gibson.coiReload', '1'); location.reload(); }
+  });
+}
+</script>
 </head>
 <body>
 <canvas id="face"></canvas>
@@ -81,13 +91,16 @@ body.convo[data-busy=listening] #convoGlow{opacity:1}
   <h2>Voice</h2>
   <div class="grid">
    <div class="card"><h3><span>Gibson's voice</span><small class="ok" id="nState"></small></h3>
-    <label>Engine <select id="vEngine"><option value="auto">Auto: neural voice if this phone is fast enough, else phone voice</option><option value="neural">Neural voice always (Kokoro; may be slow on some phones)</option><option value="browser">Phone voice (fast, instant replies)</option></select></label>
-    <label>Neural voice <select id="nVoice"></select></label>
+    <label>Engine <select id="vEngine"><option value="auto">Auto: Gibson voice (Kokoro) if this phone is fast enough, else Piper, phone voice last</option><option value="neural">Kokoro always (Gibson blends; may be slow on some phones)</option><option value="piper">Piper always (fast neural voice)</option><option value="browser">Phone voice (instant, robotic)</option></select></label>
+    <label>Kokoro voice <select id="nVoice"></select></label>
+    <label>Piper voice <select id="pVoice"></select></label>
     <label class="chk"><input type="checkbox" id="robot"> Robot-warm effect (subtle metallic shimmer)</label>
     <label>Speed <span id="rateV"></span><input type="range" id="rate" min="0.6" max="1.6" step="0.05"></label>
-    <label>Neural engine <select id="nDevice"><option value="auto">Auto (GPU if this phone supports it, else CPU)</option><option value="wasm">CPU (WASM, 92 MB download once)</option><option value="webgpu">GPU (WebGPU, 163-326 MB download once)</option></select></label>
+    <label class="chk"><input type="checkbox" id="filler"> Say “Hmm.” while thinking</label>
+    <label>Kokoro runs on <select id="nDevice"><option value="auto">Auto (GPU if this phone has one, else CPU)</option><option value="webgpu-fp16">GPU fp16 (163 MB once)</option><option value="webgpu-fp32">GPU fp32 (326 MB once, most compatible)</option><option value="webgpu-q8">GPU q8 (92 MB once, experimental)</option><option value="wasm">CPU q8 (92 MB once)</option></select></label>
     <button id="testVoice" class="go">Test voice</button>
-    <small id="nNote">The first time, the neural voice downloads once (use Wi-Fi), then works offline. Until it's ready, Gibson uses the phone voice. If he's slow to start talking on this phone, pick “Phone voice (fast)” above.</small></div>
+    <pre id="engInfo" style="white-space:pre-wrap;font-size:11px;opacity:.75;margin:6px 0 0"></pre>
+    <small id="nNote">Voices download once (use Wi-Fi: Piper 63 MB, Kokoro 92-326 MB), then work offline. Auto times each voice on this phone and picks the best one that can start talking fast. Until they're ready, Gibson uses the phone voice.</small></div>
    <div class="card"><h3><span>Phone voice (fallback)</span></h3>
     <label>Voice <select id="voice"></select></label>
     <label>Pitch <span id="pitchV"></span><input type="range" id="pitch" min="0.5" max="1.8" step="0.05"></label>

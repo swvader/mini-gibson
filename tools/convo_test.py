@@ -27,7 +27,7 @@ with sync_playwright() as p:
     pg.on('console', lambda m: (errs.append(m.type + ': ' + m.text) if m.type in ('error', 'warning') and 'content-length' not in m.text and 'No available adapters' not in m.text else None, logs.append(m.text) if '[gibson]' in m.text else None))
     pg.on('pageerror', lambda e: errs.append('pageerror: ' + str(e)))
     pg.goto(URL, wait_until='networkidle')
-    pg.evaluate("localStorage.setItem('gibson.app.v1', JSON.stringify({wake: true, convo: true, convoTimeout: 10, vEngine: 'neural', vEngineV: 2}))"); pg.reload(wait_until='networkidle')
+    pg.evaluate("localStorage.setItem('gibson.app.v1', JSON.stringify({wake: true, convo: true, convoTimeout: 10, vEngine: (window.__ENG || 'auto'), vEngineV: 2}))"); pg.reload(wait_until='networkidle')
     pg.click('#start')
     st = lambda: pg.evaluate('GibsonApp.state()')
     def wait(cond, ms=60000, step=100):
@@ -37,7 +37,7 @@ with sync_playwright() as p:
             if cond(s): return s
             pg.wait_for_timeout(step)
         return st()
-    s = wait(lambda s: s['neural'] == 'ready' and not s['busy'] and s['wakeReady'], 120000)
+    s = wait(lambda s: (s.get('piper') == 'ready' or s['neural'] == 'ready') and not s['busy'] and s['wakeReady'], 120000); pg.wait_for_timeout(4000)
     print('ready:', s)
     pg.evaluate("GibsonApp.Wake.worker.postMessage({type:'testmode', on:true})")
     FEED = '''async (name) => { const buf = new Int16Array(await (await fetch('tools/testclips/' + name + '.raw')).arrayBuffer());

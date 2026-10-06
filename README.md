@@ -12,14 +12,12 @@ Static app built on the face engine from ../gibson-face/index.html. `tools/build
 - voice-samples/: MP3 demos (see "Voices" below)
 - sw.js: bump VERSION on every change. It only deletes its own old gibson-vN caches.
 - tools/smoke.py URL [fake_mic.wav]: headless test, including the wake word end to end through Chrome's fake mic
-- tools/neural_test.py, tools/wake_test.py
+- tools/neural_test.py, tools/wake_test.py, tools/convo_test.py, tools/perf.py
 
-## Serving
-`/workspace/gibson-run/serve.py` adds `Cross-Origin-Opener-Policy: same-origin` and `Cross-Origin-Embedder-Policy: credentialless`. These enable multi-threaded WASM, which makes the neural voice much faster. If you move the app to GitHub Pages (which can't set headers), the voice still works but runs single-threaded and slower.
-
-To restart:
-  cd /workspace/gibson-run && nohup python3 serve.py 8765 /workspace/gibson-app > http.log 2>&1 &
-  nohup /workspace/gibson-run/cloudflared tunnel --no-autoupdate --url http://127.0.0.1:8765 > /workspace/gibson-run/tunnel.log 2>&1 &   # new URL each time
+## Serving (GitHub Pages)
+Live at https://swvader.github.io/mini-gibson/ from the repo swvader/mini-gibson, branch main. To deploy: bump VERSION in sw.js, commit, `git push`, then check that the live sw.js shows the new version (Pages takes about 30-60 s).
+Pages can't send headers, so sw.js adds `Cross-Origin-Opener-Policy: same-origin` and `Cross-Origin-Embedder-Policy: credentialless` to every same-origin response (the coi-serviceworker approach, merged into our one service worker). On the first visit the page reloads once when the worker takes over. After that `crossOriginIsolated` is true and the voices run multi-threaded WASM. Cross-origin CORS fetches (Hugging Face models, Gemini, Open-Meteo, the jsdelivr ORT runtime) keep working under `credentialless`.
+For local tests, `python3 -m http.server` works too, because the service worker adds the headers.
 
 ## Wake word model (trained on the box, no accounts)
 Everything is in /workspace/gibson-lab:
@@ -35,7 +33,24 @@ Training data is synthetic or CC BY, so the classifier is ours.
 Keys live only in the phone's localStorage (key gibson.app.v1). None are in the code.
 Head movement (ESP32) is off by default; see the `Head` object in app.js.
 
+## Voices and speed
+- **Kokoro** (tts-worker.js): the Gibson blends. It runs on WebGPU when the phone has a real GPU (fp16 when supported, else fp32; q8 is selectable), otherwise on the CPU (WASM q8). Settings → Voice shows which backend is in use and the measured speed.
+- **Piper** (piper-worker.js + piper-core.js + vendor/phonemizer.js + wake/ort.wasm.min.mjs): fast VITS voices on the CPU, with eSpeak-NG phonemes (the same as piper-phonemize).
+  - Voices: Norman and John by Bryce Beattie (https://brycebeattie.com/files/tts/). Both are public domain and were trained only on public-domain LibriVox recordings; Norman was trained from scratch and John was fine-tuned from Kristin, which is also public domain. Models load from huggingface.co/rhasspy/piper-voices.
+  - Avoided: voices that are fine-tuned from lessac, whose Blizzard 2013 dataset license is restrictive, and voices on NC datasets (ryan, hfc_*, l2arctic).
+- **Auto** (default) times each engine on the phone (and remembers it per backend):
+  1. Kokoro, if it renders at least 2× faster than real time.
+  2. Otherwise Piper.
+  3. The phone voice only while nothing else is loaded.
+
+  If Kokoro was measured clearly too slow on this exact setup, Auto doesn't even load it.
+- **Streaming:** Gemini uses `streamGenerateContent` (SSE) and the OpenAI-style providers use `stream: true`. The voice starts on the first finished sentence while the rest is still arriving.
+  - Thinking is set to minimal (`thinkingLevel: minimal`, `thinkingBudget: 0` on 2.5 Flash, `low` where minimal isn't allowed), and the setting that works is cached per model.
+  - `google_search` is only sent when the question sounds live (news, scores, prices, hours, today, latest, ...). Weather still comes from Open-Meteo.
+- **"Hmm." filler:** if no answer has arrived after 1.2 s, Gibson says a short "Hmm." in the current voice. It never holds the answer back more than 0.2 s.
+- tools/perf.py URL ENGINE [--cap N] [--throttle 4] [--brain gemini-mock]: speed and time-to-first-audio benchmark.
+
 ## Conversation mode and voice speed
 - After "Hey Gibson" or a tap, Gibson keeps listening after every reply with no wake word needed. A faint red glow at the screen edge means the mode is on. To end it, say "stop listening", "that's all", "never mind", "goodbye Gibson", "go to sleep" and so on, or just stay quiet for the timeout (Settings → Conversation mode, 10-60 s, default 25 s). You can interrupt him by tapping, or by saying "Hey Gibson" when the on-device wake word is on.
-- Voice engine choice (Settings → Voice): **Auto** (the default) times the neural voice on this phone and uses it only if it renders at least as fast as real time; otherwise it uses the phone voice. **Neural always** keeps the Kokoro voice even when it's slow. **Phone voice (fast)** always replies instantly.
-- Each reply uses one engine from start to finish. Neural audio starts only once the rest of the reply will render without gaps of more than about 1 s. If no neural audio is ready in time (8 s on Auto, 20 s on Neural always), the whole reply goes to the phone voice. Nothing is ever said twice.
+- Voice engine choice (Settings → Voice): **Auto** (default, see above), **Kokoro always**, **Piper always**, **Phone voice**.
+- Each reply uses one engine from start to finish, and nothing is ever said twice. If the neural voice can't produce the first audio in time (6 s on Auto, 20 s when an engine is forced), the whole reply goes to the phone voice. With Kokoro forced on a slow phone, playback starts only once the rest will render without gaps of more than about 1 s.

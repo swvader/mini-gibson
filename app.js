@@ -3,7 +3,7 @@
 'use strict';
 const G = window.Gibson;
 const $ = s => document.querySelector(s);
-const VERSION = '1.1.0';
+const VERSION = '1.2.0';
 
 // ------------------------------------------------------------------ settings (localStorage only, on this phone)
 const LS = 'gibson.app.v1';
@@ -12,7 +12,7 @@ const DEFAULTS = {
   keys: { grok: '', gemini: '', openai: '', meta: '', custom: '' },
   models: { grok: 'grok-4.20-0309-non-reasoning', gemini: 'gemini-flash-latest', openai: 'gpt-6-luna', meta: 'muse-spark-1.1', custom: '' },
   customUrl: '', voice: '', rate: 1.0, pitch: 1.1, lang: 'en-US', wake: false,
-  persona: 'andrew', vEngine: 'auto', nVoice: 'gibson', robot: false, nDevice: 'auto', wakeEngine: 'ondevice', wakeSens: 0.5, convo: true, convoTimeout: 25,
+  persona: 'andrew', vEngine: 'auto', nVoice: 'gibson', pVoice: 'norman', filler: true, robot: false, nDevice: 'auto', wakeEngine: 'ondevice', wakeSens: 0.5, convo: true, convoTimeout: 25,
   robotOffset: false, safe: false, head: false, headTransport: 'websocket', headUrl: ''
 };
 function load() {
@@ -60,48 +60,97 @@ async function fetchT(url, opts, ms) {
   try { return await fetch(url, Object.assign({}, opts, { signal: ac.signal })); } finally { clearTimeout(t); }
 }
 function textOf(c) { if (typeof c === 'string') return c; if (Array.isArray(c)) return c.map(p => p.text || '').join(''); return ''; }
-async function callProvider(id, msgs) {
-  const p = PROVIDERS[id];
-  if (p.kind === 'demo') return demoBrain(msgs[msgs.length - 1].content);
-  if (p.kind === 'gemini') {
-    // try the chosen model, then well-known free-tier aliases if that model name is unknown (404/400)
-    const tries = [...new Set([S.models.gemini === 'gemini-3.8-flash' ? '' : S.models.gemini, 'gemini-flash-latest', 'gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-flash-lite-latest'].filter(Boolean))];
-    let r, lastErr = '';
+// Server-sent events reader: calls onData(dataString) per event. Aborts if the stream goes quiet for `idleMs`.
+async function readSSE(r, onData, ac, idleMs) {
+  const rd = r.body.getReader(), dec = new TextDecoder(); let buf = '', t = 0;
+  const arm = () => { clearTimeout(t); t = setTimeout(() => ac.abort(), idleMs || 15000); };
+  const flush = ev => { const d = ev.split(/\r?\n/).filter(l => l.startsWith('data:')).map(l => l.slice(5).trim()).join('\n'); if (d) onData(d); };
+  try {
+    arm();
+    for (;;) {
+      const { value, done } = await rd.read(); if (done) break; arm();
+      buf += dec.decode(value, { stream: true });
+      let k; while ((k = buf.search(/\r?\n\r?\n/)) >= 0) { const ev = buf.slice(0, k); buf = buf.slice(k).replace(/^\r?\n\r?\n/, ''); flush(ev); }
+    }
+    if (buf.trim()) flush(buf);
+  } finally { clearTimeout(t); }
+}
+// Questions that need live info get Gemini's web search; everything else skips it (search adds latency).
+const LIVE_RE = /\b(news|headlines?|today|tonight|tomorrow|yesterday|this (?:week|weekend|morning|afternoon|evening|month|year)|latest|current(?:ly)?|right now|recent(?:ly)?|scores?|game|games|match|won|win|winning|playing|standings|playoffs?|price|prices|cost|costs|stocks?|bitcoin|crypto|market|open|opens|close|closes|closed|hours|election|president|release[sd]?|update[sd]?|traffic|showtimes?|movies?|events?|concerts?|near me|nearby|restaurants?|look (?:it )?up|search|google|who is|who's|what happened|when is|schedule)\b/i;
+// thinking off/minimal where the model allows it (it adds seconds before the first word). Best first; cached per model.
+function thinkOpts(model) {
+  const m = model.toLowerCase();
+  if (/gemini-(?:1|2\.0)/.test(m)) return [null];
+  if (/2\.5/.test(m)) return /pro/.test(m) ? [{ thinkingBudget: 128 }, null] : [{ thinkingBudget: 0 }, null];
+  if (/3\.[78]|pro/.test(m)) return [{ thinkingLevel: 'low' }, null];
+  return [{ thinkingLevel: 'minimal' }, { thinkingLevel: 'low' }, { thinkingBudget: 0 }, null];
+}
+const thinkOk = (() => { try { return JSON.parse(localStorage.getItem('gibson.gthink') || '{}'); } catch (e) { return {}; } })();
+async function gemini(msgs, onText, live) {
+  const key = encodeURIComponent(S.keys.gemini.trim());
+  const contents = msgs.map(m => ({ role: m.role === 'assistant' ? 'model' : 'user', parts: [{ text: m.content }] }));
+  // try the chosen model, then well-known free-tier aliases if that model name is unknown or busy
+  const tries = [...new Set([S.models.gemini === 'gemini-3.8-flash' ? '' : S.models.gemini, 'gemini-flash-latest', 'gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-flash-lite-latest'].filter(Boolean))];
+  let lastErr = '';
+  for (const search of live ? [true, false] : [false]) {          // last resort: same request without web search
     for (const model of tries) {
-      r = await fetchT(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(S.keys.gemini.trim())}`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ systemInstruction: { parts: [{ text: systemPrompt() }] },
-          contents: msgs.map(m => ({ role: m.role === 'assistant' ? 'model' : 'user', parts: [{ text: m.content }] })),
-          tools: [{ google_search: {} }], // live web search: news, scores, hours, anything current
-          generationConfig: { maxOutputTokens: 1024 } })
-      });
-      if (r.ok) { if (S.models.gemini !== model) { S.models.gemini = model; try { save(); } catch (e) {} } break; }
-      lastErr = `HTTP ${r.status} ${(await r.text()).slice(0, 160)}`;
-      if (![400,404,429,500,503].includes(r.status)) break; // busy or unknown model: try the next one
+      const opts = thinkOpts(model); let ti = Math.min(thinkOk[model] || 0, opts.length - 1);
+      for (; ti < opts.length; ti++) {
+        const gc = { maxOutputTokens: 1024 }; if (opts[ti]) gc.thinkingConfig = opts[ti];
+        const body = { systemInstruction: { parts: [{ text: systemPrompt() }] }, contents, generationConfig: gc };
+        if (search) body.tools = [{ google_search: {} }];
+        const ac = new AbortController(), to = setTimeout(() => ac.abort(), 20000);
+        let r;
+        try { r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:streamGenerateContent?alt=sse&key=${key}`,
+          { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body), signal: ac.signal }); }
+        finally { clearTimeout(to); }
+        if (r.ok) {
+          if (S.models.gemini !== model) { S.models.gemini = model; try { save(); } catch (e) {} }
+          if (thinkOk[model] !== ti) { thinkOk[model] = ti; try { localStorage.setItem('gibson.gthink', JSON.stringify(thinkOk)); } catch (e) {} }
+          let out = '';
+          try {
+            await readSSE(r, d => { let j; try { j = JSON.parse(d); } catch (e) { return; }
+              const parts = (j.candidates && j.candidates[0] && j.candidates[0].content && j.candidates[0].content.parts) || [];
+              const t = parts.filter(x => !x.thought).map(x => x.text || '').join(''); if (t) { out += t; onText && onText(t); } }, ac);
+          } catch (e) { if (!out) throw e; }                       // keep whatever already arrived
+          if (!out.trim()) throw new Error('empty reply');
+          return out;
+        }
+        const txt = (await r.text()).slice(0, 300); lastErr = `HTTP ${r.status} ${txt.slice(0, 160)}`;
+        if (r.status === 400 && /think/i.test(txt) && ti < opts.length - 1) continue;   // this model wants a different thinking setting
+        break;
+      }
+      if (!/^HTTP (400|404|429|500|503)/.test(lastErr)) throw new Error(lastErr);   // e.g. bad key: don't keep trying
     }
-    if (!r.ok) { // last resort: same request without web search
-      r = await fetchT(`https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent?key=${encodeURIComponent(S.keys.gemini.trim())}`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ systemInstruction: { parts: [{ text: systemPrompt() }] },
-          contents: msgs.map(m => ({ role: m.role === 'assistant' ? 'model' : 'user', parts: [{ text: m.content }] })),
-          generationConfig: { maxOutputTokens: 1024 } }) });
-      if (!r.ok) throw new Error(lastErr);
-    }
-    const j = await r.json();
-    const t = ((j.candidates && j.candidates[0] && j.candidates[0].content && j.candidates[0].content.parts) || []).map(x => x.text || '').join('');
-    if (!t.trim()) throw new Error('empty reply');
-    return t;
   }
+  throw new Error(lastErr || 'no Gemini model answered');
+}
+// onText(delta) receives the reply as it streams in (so Gibson can start speaking the first sentence early)
+async function callProvider(id, msgs, onText, live) {
+  const p = PROVIDERS[id];
+  if (p.kind === 'demo') { const t = await demoBrain(msgs[msgs.length - 1].content); onText && onText(t); return t; }
+  if (p.kind === 'gemini') return gemini(msgs, onText, live);
   const url = p.custom ? S.customUrl : p.url, key = S.keys[id], model = S.models[id] || DEFAULTS.models[id];
   const body = { messages: [{ role: 'system', content: systemPrompt() }, ...msgs] };
   if (model) body.model = model;
   body[p.tokenParam || 'max_tokens'] = p.tokenParam ? 800 : 300;
+  if (!p.custom && onText) body.stream = true;
   const headers = { 'Content-Type': 'application/json' }; if (key) headers.Authorization = 'Bearer ' + key;
-  const r = await fetchT(url, { method: 'POST', headers, body: JSON.stringify(body) });
+  const ac = new AbortController(), to = setTimeout(() => ac.abort(), 25000);
+  let r; try { r = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body), signal: ac.signal }); } finally { clearTimeout(to); }
   if (!r.ok) throw new Error(`HTTP ${r.status} ${(await r.text()).slice(0, 140)}`);
+  if (/event-stream/.test(r.headers.get('content-type') || '')) {
+    let out = '';
+    try { await readSSE(r, d => { if (d === '[DONE]') return; let j; try { j = JSON.parse(d); } catch (e) { return; }
+      const t = textOf(j.choices && j.choices[0] && j.choices[0].delta && j.choices[0].delta.content); if (t) { out += t; onText && onText(t); } }, ac); }
+    catch (e) { if (!out) throw e; }
+    if (!out.trim()) throw new Error('empty reply');
+    return out;
+  }
   const j = await r.json();
   const t = textOf(j.choices && j.choices[0] && j.choices[0].message && j.choices[0].message.content);
   if (!t.trim()) throw new Error('empty reply');
+  onText && onText(t);
   return t;
 }
 
@@ -127,19 +176,24 @@ async function weatherContext() {
     return `Live weather at Lenny's location right now: ${Math.round(c.temperature_2m)}°F (feels like ${Math.round(c.apparent_temperature)}°F), ${WMO[c.weather_code] || 'mixed'}, humidity ${c.relative_humidity_2m}%, wind ${Math.round(c.wind_speed_10m)} mph. Today: high ${Math.round(d.temperature_2m_max[0])}°F, low ${Math.round(d.temperature_2m_min[0])}°F, ${d.precipitation_probability_max[0]}% chance of rain, ${WMO[d.weather_code[0]] || ''}. Tomorrow: high ${Math.round(d.temperature_2m_max[1])}°F, low ${Math.round(d.temperature_2m_min[1])}°F, ${d.precipitation_probability_max[1]}% chance of rain, ${WMO[d.weather_code[1]] || ''}. Use this real data; say temperatures as whole numbers in degrees.`;
   } catch (e) { return 'Live weather: the weather service did not answer right now.'; }
 }
-// Ask the brain chain; auto-fallback to the next provider on any failure.
-async function brain(userText) {
+// Ask the brain chain; auto-fallback to the next provider on any failure (only if nothing was streamed yet).
+async function brain(userText, onText) {
   remember('user', userText);
   const errors = [];
   const wx = WX_RE.test(userText) ? await weatherContext() : null;
+  const live = LIVE_RE.test(userText);
   for (const id of chain()) {
+    let got = '';
     try {
       const msgs = history.slice();
       if (wx && id !== 'demo') msgs[msgs.length - 1] = { role: 'user', content: `${userText}\n\n(${wx})` };
-      const raw = await callProvider(id, msgs);
+      const raw = await callProvider(id, msgs, t => { got += t; onText && onText(t); }, live);
       remember('assistant', raw);
-      return { raw, provider: id, errors };
-    } catch (e) { errors.push(`${PROVIDERS[id].label}: ${e.name === 'AbortError' ? 'timeout' : (e.message || e)}`); }
+      return { raw, provider: id, errors, live };
+    } catch (e) {
+      if (got.trim()) { remember('assistant', got); return { raw: got, provider: id, errors, live }; }   // cut off mid-reply: keep what was said
+      errors.push(`${PROVIDERS[id].label}: ${e.name === 'AbortError' ? 'timeout' : (e.message || e)}`);
+    }
   }
   return { raw: '[error] My thinking circuits are tangled. Please try again.', provider: 'none', errors };
 }
@@ -231,24 +285,40 @@ const NEURAL_VOICES = [
   { id: 'bf_emma', name: 'Emma (UK female)', lang: 'b', mix: { bf_emma: 1 } }
 ];
 const nvoice = () => NEURAL_VOICES.find(v => v.id === S.nVoice) || NEURAL_VOICES[0];
+// measured speed per backend (seconds of compute per second of audio), remembered on this phone
+const coi = () => (self.crossOriginIsolated ? 'mt' : 'st');
+const rtfKey = (eng, cfg) => `gibson.rtf2.${eng}.${cfg}.${coi()}`;
+const getRtf = k => { const v = +localStorage.getItem(k); return v > 0 ? v : null; };
+const setRtf = (k, v) => { try { localStorage.setItem(k, v.toFixed(3)); } catch (e) {} };
+const KOKORO_FAST = 0.5;     // Auto uses Kokoro only if it renders 2x faster than real time (first words in ~1-2 s)
 const Neural = {
-  w: null, state: 'off', msg: '', id: 0, epoch: 0, pend: new Map(), rtf: (() => { const v = +localStorage.getItem('gibson.rtf'); return v > 0 ? v : null; })(),
-  async pickDevice() {   // auto: GPU (WebGPU fp16, 163 MB) when the phone supports it, else CPU (WASM q8, 92 MB)
-    if (S.nDevice === 'wasm' || !('gpu' in navigator) || this.noGpu) return { device: 'wasm', dtype: 'q8' };
-    try { const ad = await navigator.gpu.requestAdapter(); if (!ad) return { device: 'wasm', dtype: 'q8' };
-      if (ad.features.has('shader-f16')) return { device: 'webgpu', dtype: 'fp16' };
-      return S.nDevice === 'webgpu' ? { device: 'webgpu', dtype: 'fp32' } : { device: 'wasm', dtype: 'q8' };
-    } catch (e) { return { device: 'wasm', dtype: 'q8' }; }
+  name: 'Kokoro', w: null, state: 'off', msg: '', id: 0, epoch: 0, pend: new Map(), rtf: null, dev: null, cfg: '', gpuName: '',
+  async pickDevice() {   // auto: WebGPU (fp16 if the GPU supports it, else fp32) on a real GPU; else CPU (WASM q8)
+    const d = S.nDevice, cpu = { device: 'wasm', dtype: 'q8' };
+    if (d === 'wasm' || !('gpu' in navigator) || this.noGpu) return cpu;
+    let ad = null; try { ad = await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' }); } catch (e) {}
+    if (!ad) { this.gpuName = 'no WebGPU adapter'; return cpu; }
+    const info = ad.info || {}; this.gpuName = [info.vendor, info.architecture, info.description].filter(Boolean).join(' ') || 'GPU';
+    if (d === 'webgpu-fp32') return { device: 'webgpu', dtype: 'fp32' };
+    if (d === 'webgpu-fp16') return { device: 'webgpu', dtype: 'fp16' };
+    if (d === 'webgpu-q8') return { device: 'webgpu', dtype: 'q8' };
+    if (ad.isFallbackAdapter || info.isFallbackAdapter || /swiftshader|llvmpipe|software/i.test(this.gpuName)) return cpu;   // software "GPU": CPU is faster
+    return ad.features.has('shader-f16') && !this.noF16 ? { device: 'webgpu', dtype: 'fp16' } : { device: 'webgpu', dtype: 'fp32' };
   },
   async ensure() {
-    if (this.w || S.vEngine === 'browser') return;
-    this.state = 'loading'; this.msg = 'starting…'; showVoiceState();
-    try { this.w = new Worker('tts-worker.js', { type: 'module' }); }
-    catch (e) { this.state = 'error'; this.msg = e.message; showVoiceState(); return; }
-    this.w.onmessage = e => this.onmsg(e.data);
-    this.w.onerror = e => { e.preventDefault && e.preventDefault(); this.fail('worker error ' + (e.message || '')); };
-    this.dev = await this.pickDevice();
-    if (this.w) this.w.postMessage({ type: 'load', ...this.dev });
+    if (this.w || this.starting) return;
+    this.starting = true;
+    try {
+      this.dev = await this.pickDevice(); this.cfg = this.dev.device + '-' + this.dev.dtype; this.rtf = getRtf(rtfKey('kokoro', this.cfg));
+      // Auto: if Kokoro was measured too slow on this exact setup before, don't load it (it would only compete with Piper)
+      if (S.vEngine === 'auto' && this.rtf && this.rtf > KOKORO_FAST * 2 && !this.forceLoad) { this.state = 'skipped'; this.msg = `${this.cfg} too slow here last time (${this.rtf.toFixed(2)}× real-time)`; showVoiceState(); return; }
+      this.state = 'loading'; this.msg = 'starting ' + this.cfg + '…'; showVoiceState();
+      try { this.w = new Worker('tts-worker.js', { type: 'module' }); }
+      catch (e) { this.state = 'error'; this.msg = e.message; showVoiceState(); return; }
+      this.w.onmessage = e => this.onmsg(e.data);
+      this.w.onerror = e => { e.preventDefault && e.preventDefault(); this.fail('worker error ' + (e.message || '')); };
+      this.w.postMessage({ type: 'load', ...this.dev });
+    } finally { this.starting = false; }
   },
   fail(msg) {
     this.state = 'error'; this.msg = msg; showVoiceState();
@@ -256,35 +326,96 @@ const Neural = {
     try { this.w && this.w.terminate(); } catch (e) {} this.w = null;
   },
   onmsg(m) {
-    if (m.type === 'progress') { this.msg = `downloading ${Math.round(100 * m.loaded / m.total)}% of ${Math.round(m.total / 1e6)} MB`; showVoiceState(); }
+    if (m.type === 'progress') { this.msg = `downloading ${this.cfg} ${Math.round(100 * m.loaded / m.total)}% of ${Math.round(m.total / 1e6)} MB`; showVoiceState(); }
     else if (m.type === 'ready') {
-      this.state = 'ready'; this.msg = `ready (${m.device}${m.threads ? ', multi-thread' : ''})`; showVoiceState(); this.w.postMessage({ type: 'prefetch', voice: nvoice() });
-      // measure this phone's speed once (2nd run counts; the 1st includes warm-up) so Auto can pick the right engine
-      this.gen('Hi.', nvoice(), 1, 1).catch(() => {});                  // short, so it never holds up a real reply for long
-      this.gen('Hello there, Lenny.', nvoice(), 1, 2).catch(() => {});
+      this.state = 'ready'; this.backend = `${m.device} ${m.dtype}${m.device === 'webgpu' ? ' (' + this.gpuName + ')' : m.threads ? ', multi-thread' : ', single-thread'}`;
+      this.msg = 'ready · ' + this.backend; console.log('[gibson] Kokoro backend: ' + this.backend + ', loaded in ' + m.ms + ' ms'); showVoiceState();
+      this.w.postMessage({ type: 'prefetch', voice: nvoice() });
+      // measure this phone's speed (2nd run counts; the 1st includes warm-up) so Auto can pick the right engine
+      this.gen('Hi.', nvoice(), 1, 1).catch(() => {});
+      this.gen('Hello there, Lenny. Nice to see you.', nvoice(), 1, 2).then(() => { Filler.prep(); showVoiceState(); }).catch(() => {});
     }
     else if (m.type === 'loaderror') {
-      if (this.dev && this.dev.device === 'webgpu') { console.warn('[gibson] GPU voice failed (' + m.msg + '), using CPU'); this.noGpu = true; this.fail('GPU failed, retrying on CPU'); this.ensure(); }
-      else this.fail('load failed: ' + m.msg);
+      if (this.dev && this.dev.device === 'webgpu') {
+        if (this.dev.dtype === 'fp16' && S.nDevice === 'auto') { console.warn('[gibson] GPU fp16 voice failed (' + m.msg + '), trying GPU fp32'); this.noF16 = true; }
+        else { console.warn('[gibson] GPU voice failed (' + m.msg + '), using CPU'); this.noGpu = true; }
+        this.fail('GPU failed, retrying'); this.ensure();
+      } else this.fail('load failed: ' + m.msg);
     }
     else if (m.type === 'audio' || m.type === 'error') {
       const p = this.pend.get(m.id); if (!p) return; this.pend.delete(m.id);
       if (m.type === 'error') return p.rej(new Error(m.msg));
       const dur = m.audio.length / m.sr, r = m.ms / 1000 / Math.max(.3, dur);
-      if (!p.bench || p.bench > 1) { this.rtf = this.rtf ? this.rtf * .6 + r * .4 : r; try { localStorage.setItem('gibson.rtf', this.rtf.toFixed(3)); } catch (e) {} }
-      if (this.state === 'ready' && this.rtf) { this.msg = `ready · ${this.rtf.toFixed(2)}× real-time`; showVoiceState(); }
+      if (!p.bench || p.bench > 1) { this.rtf = this.rtf && p.bench !== 2 ? this.rtf * .6 + r * .4 : r; setRtf(rtfKey('kokoro', this.cfg), this.rtf); }
+      if (this.state === 'ready') showVoiceState();
       p.res(m);
     }
   },
   gen(text, voice, speed, bench) {
-    if (!this.w) return Promise.reject(new Error('neural voice not loaded'));
+    if (!this.w) return Promise.reject(new Error(this.name + ' not loaded'));
     return new Promise((res, rej) => { const id = ++this.id; this.pend.set(id, { res, rej, bench }); this.w.postMessage({ type: 'gen', id, text, voice, speed, epoch: this.epoch }); });
   },
   cancel() { this.epoch++; if (this.w) this.w.postMessage({ type: 'cancel', epoch: this.epoch }); }
 };
+// Piper: fast VITS voices (public-domain LibriVox-based, trained by Bryce Beattie). Runs on the CPU in a worker.
+const PIPER_VOICES = [
+  { id: 'norman', name: 'Norman (US male, warm)', path: 'en/en_US/norman/medium/en_US-norman-medium' },
+  { id: 'john', name: 'John (US male, brighter)', path: 'en/en_US/john/medium/en_US-john-medium' }
+];
+const pvoice = () => PIPER_VOICES.find(v => v.id === S.pVoice) || PIPER_VOICES[0];
+const Piper = Object.assign(Object.create(Neural), {
+  name: 'Piper', w: null, state: 'off', msg: '', id: 0, epoch: 0, pend: new Map(), rtf: null,
+  async ensure() {
+    if (this.w) return;
+    this.cfg = 'wasm'; this.rtf = getRtf(rtfKey('piper', this.cfg));
+    this.state = 'loading'; this.msg = 'starting…'; showVoiceState();
+    try { this.w = new Worker('piper-worker.js', { type: 'module' }); } catch (e) { this.state = 'error'; this.msg = e.message; showVoiceState(); return; }
+    this.w.onmessage = e => this.onmsg(e.data);
+    this.w.onerror = e => { e.preventDefault && e.preventDefault(); this.fail('worker error ' + (e.message || '')); };
+    this.w.postMessage({ type: 'load', voice: pvoice() });
+  },
+  onmsg(m) {
+    if (m.type === 'progress') { this.msg = `downloading ${Math.round(100 * m.loaded / m.total)}% of ${Math.round(m.total / 1e6)} MB`; showVoiceState(); }
+    else if (m.type === 'ready') {
+      this.state = 'ready'; this.backend = `wasm, ${m.threads} thread${m.threads > 1 ? 's' : ''}`; this.msg = 'ready · ' + this.backend;
+      console.log('[gibson] Piper backend: ' + this.backend + ', loaded in ' + m.ms + ' ms'); showVoiceState();
+      this.gen('Hello there, Lenny. Nice to see you.', pvoice(), 1, 2).then(() => { Filler.prep(); showVoiceState(); }).catch(() => {});
+    }
+    else if (m.type === 'loaderror') this.fail('load failed: ' + m.msg);
+    else if (m.type === 'audio' || m.type === 'error') {
+      const p = this.pend.get(m.id); if (!p) return; this.pend.delete(m.id);
+      if (m.type === 'error') return p.rej(new Error(m.msg));
+      const r = m.ms / 1000 / Math.max(.3, m.audio.length / m.sr);
+      if (!p.bench || p.bench > 1) { this.rtf = this.rtf && p.bench !== 2 ? this.rtf * .6 + r * .4 : r; setRtf(rtfKey('piper', this.cfg), this.rtf); }
+      if (this.state === 'ready') showVoiceState();
+      p.res(m);
+    }
+  }
+});
+// Which engine speaks the next reply: 'kokoro' | 'piper' | 'phone'. ONE engine per reply, never switched mid-reply.
+function pickEngine(force) {
+  const k = Neural.state === 'ready', p = Piper.state === 'ready';
+  if (force === 'kokoro' && k) return 'kokoro';
+  if (force === 'piper' && p) return 'piper';
+  if (S.vEngine === 'browser') return 'phone';
+  if (S.vEngine === 'neural') return k ? 'kokoro' : 'phone';
+  if (S.vEngine === 'piper') return p ? 'piper' : 'phone';
+  if (k && Neural.rtf != null && Neural.rtf <= KOKORO_FAST) return 'kokoro';    // auto: best voice if this phone is fast enough
+  if (p) return 'piper';                                                        // else the fast neural voice
+  if (k && Neural.rtf != null && Neural.rtf <= 1) return 'kokoro';
+  return 'phone';                                                               // last resort while voices load
+}
+function ensureVoices() {
+  if (S.vEngine === 'browser') return;
+  if (S.vEngine !== 'neural') Piper.ensure();
+  if (S.vEngine !== 'piper') Neural.ensure();
+}
 function showVoiceState() {
   const el = $('#nState'); if (!el) return;
-  el.textContent = S.vEngine === 'browser' ? '● phone voice' : Neural.state === 'ready' ? (S.vEngine === 'auto' ? (useNeural() ? '● neural · ' : '● phone voice (neural too slow here) · ') : '● ') + Neural.msg : Neural.state === 'error' ? '✕ ' + Neural.msg : '… ' + Neural.msg;
+  const fmt = (E) => E.state === 'ready' ? `${E.backend}${E.rtf ? ' · ' + E.rtf.toFixed(2) + '× real-time' : ''}` : E.state === 'off' ? 'off' : (E.state === 'error' ? '✕ ' : E.state === 'skipped' ? 'skipped: ' : '… ') + E.msg;
+  const eng = pickEngine(), name = { kokoro: 'Kokoro (Gibson voice)', piper: 'Piper (' + pvoice().name.split(' (')[0] + ')', phone: 'phone voice' }[eng];
+  el.textContent = S.vEngine === 'browser' ? '● phone voice' : '● speaking with ' + name;
+  const d = $('#engInfo'); if (d) d.textContent = `Kokoro: ${fmt(Neural)}\nPiper: ${fmt(Piper)}\nPage isolation (multi-thread): ${self.crossOriginIsolated ? 'on' : 'off'}`;
 }
 
 // Web Audio output: neural audio -> [robot-warm effect] -> analyser (drives the mouth) -> speakers
@@ -339,71 +470,128 @@ const AudioOut = {
     this.raf = requestAnimationFrame(tick);
   }
 };
-function sentences(text) {
-  const parts = String(text).match(/[^.!?…]+(?:[.!?…]+["')\]]*|$)\s*/g) || [text];
-  const out = []; for (const p of parts.map(x => x.trim()).filter(Boolean)) { if (out.length && (out[out.length - 1].length < 18 || p.length < 8)) out[out.length - 1] += ' ' + p; else out.push(p); }
-  // long pieces (especially the first) are split at a comma so the first audio starts sooner on slow phones
-  const fin = []; out.forEach((p, i) => {
-    let lim = i === 0 ? 32 : 110, lo = i === 0 ? 10 : 18, rest = p;
-    while (rest.length > lim) { if (fin.length) { lim = 110; lo = 18; if (rest.length <= lim) break; } const c = rest.slice(lo, rest.length - 12).search(/[,;:—–.!?]\s/); if (c < 0) break; fin.push(rest.slice(0, c + lo + 1).trim()); rest = rest.slice(c + lo + 1).trim(); }
-    if (rest) fin.push(rest);
-  });
-  return fin.length ? fin : [String(text)];
-}
+const cleanText = t => String(t).replace(/\[[^\]]{1,24}\]/g, ' ').replace(/[*_#`~>|]/g, '').replace(/\s+/g, ' ').trim();
 let speakTok = 0;
-function stopSpeech() { speakTok++; Neural.cancel(); AudioOut.stop(); G.stop(); try { speechSynthesis.cancel(); } catch (e) {} Wake.echo(false); }
-// Which engine speaks this reply. ONE engine per reply, never switched mid-reply.
-//   browser: phone voice. neural: always Kokoro. auto (default): Kokoro only if this phone renders it at least ~real time.
-function useNeural(force) {
-  if (Neural.state === 'ready' && force) return true;
-  if (S.vEngine === 'browser' || Neural.state !== 'ready') return false;
-  if (S.vEngine === 'neural') return true;
-  return Neural.rtf != null && Neural.rtf <= 1.05;
+function stopSpeech() { speakTok++; Neural.cancel(); Piper.cancel(); Filler.cancel(); AudioOut.stop(); G.stop(); try { speechSynthesis.cancel(); } catch (e) {} Wake.echo(false); }
+// "Hmm." while the brain is thinking, pre-rendered in the current voice, so a slow answer never feels dead.
+function trimSilence(a, sr) {
+  let pk = 0; for (const x of a) pk = Math.max(pk, Math.abs(x)); const th = pk * .04, pad = Math.round(sr * .03);
+  let i = 0, j = a.length - 1; while (i < j && Math.abs(a[i]) < th) i++; while (j > i && Math.abs(a[j]) < th) j--;
+  return a.slice(Math.max(0, i - pad), Math.min(a.length, j + pad));
 }
-const estDur = (t, sp) => Math.max(.6, t.length / 13.5 / (sp || 1));     // seconds of speech, rough
-// Neural reply: all sentences are queued at once (the worker renders them in order). Playback starts only when the rest will
-// finish rendering before the buffered audio runs out (gaps under ~1 s); on a slow phone that means rendering everything first.
-// If nothing could be spoken within 12 s, the WHOLE reply goes to the phone voice instead (nothing is ever said twice).
-async function speakNeural(text, my, begin) {
-  const parts = sentences(text), v = nvoice(), sp = S.rate * (v.speed || 1);
-  const proms = parts.map(p => Neural.gen(p, v, sp)); proms.forEach(p => p.catch(() => {}));
-  const wait = S.vEngine === 'neural' ? 20000 : 8000, deadline = Date.now() + wait;   // 'Neural always' waits longer; Auto gives up fast
-  let k = -1, buffered = 0;
-  while (k < parts.length - 1) {
-    const left = deadline - Date.now();
-    const r = await Promise.race([proms[k + 1], new Promise(res => setTimeout(() => res(null), Math.max(0, left)))]);
-    if (my !== speakTok) return 'cancel';
-    if (!r) { console.log(`[gibson] neural: no audio within ${wait / 1000} s (${k + 1}/${parts.length} parts rendered)`); return 'slow'; }
-    k++; buffered += r.audio.length / r.sr;
-    const rest = parts.slice(k + 1).reduce((a, p) => a + estDur(p, sp), 0);
-    if ((Neural.rtf || 1) * rest <= buffered + 0.8) break;            // safe to start: no gap over ~1 s
-  }
-  console.log(`[gibson] neural: ${parts.length} part(s), ${k + 1} rendered, first audio after ${Date.now() - deadline + wait} ms (rtf ${(Neural.rtf || 0).toFixed(2)})`);
-  begin();
-  for (let i = 0; i < parts.length; i++) {
-    const r = await proms[i];
-    if (my !== speakTok) return 'cancel';
-    Wake.echo(true, parts[i]); await AudioOut.play(r.audio, r.sr);
-    if (my !== speakTok) return 'cancel';
-  }
-  return 'done';
-}
-// Resolves the moment the last audio ends, so the conversation can continue immediately.
-async function speakOut(text, onStart, force) {
-  const my = ++speakTok; let begun = false; const begin = () => { if (!begun) { begun = true; onStart && onStart(); } };
-  try {
-    if (useNeural(force)) {
-      let res;
-      try { res = await speakNeural(text, my, begin); } catch (e) { res = begun ? 'done' : 'error:' + e.message; }
-      if (res === 'done' || res === 'cancel' || my !== speakTok) return;
-      Neural.cancel();                                     // nothing was spoken yet: drop the neural render, use the phone voice for ALL of it
-      console.log('[gibson] neural voice not ready in time (' + res + '), phone voice for this WHOLE reply');
-      status('Neural voice was too slow for this reply (' + res + '); used the phone voice. Tip: Voice → Engine → Phone voice (fast).');
+const Filler = {
+  clips: new Map(), t: 0, p: null,
+  key(eng) { return eng === 'kokoro' ? 'k:' + nvoice().id : eng === 'piper' ? 'p:' + pvoice().id : ''; },
+  prep() {
+    for (const [eng, E, v] of [['kokoro', Neural, nvoice()], ['piper', Piper, pvoice()]]) {
+      const k = this.key(eng); if (E.state !== 'ready' || this.clips.has(k)) continue;
+      this.clips.set(k, null);
+      E.gen('Hmm.', v, eng === 'kokoro' ? (v.speed || 1) : 1, 1).then(m => this.clips.set(k, { a: trimSilence(m.audio, m.sr), sr: m.sr })).catch(() => this.clips.delete(k));
     }
-    if (my !== speakTok) return;
-    begin(); Wake.echo(true, text); await G.speak(text, speakOpts());
-  } finally { if (my === speakTok) Wake.echo(false); }
+  },
+  arm(my, ms) {
+    this.cancel(); if (!S.filler) return;
+    this.t = setTimeout(() => {
+      if (my !== reqId || busy !== 'thinking') return;
+      const c = this.clips.get(this.key(pickEngine())); if (!c) return;
+      this.p = AudioOut.play(c.a.slice(), c.sr, 'filler');
+    }, ms || 1200);
+  },
+  // the real answer is ready: let the "Hmm" finish only if it's nearly done (never hold the reply more than 0.2 s)
+  wait() { clearTimeout(this.t); const p = this.p; this.p = null; return p ? Promise.race([p, new Promise(r => setTimeout(r, 200))]) : Promise.resolve(); },
+  cancel() { clearTimeout(this.t); this.p = null; }
+};
+// A spoken reply. Text can arrive in pieces (streamed from the AI): each finished sentence is rendered right away and
+// played in order, so the first sentence plays while the rest is still being written/rendered.
+// Rules: one engine for the whole reply; nothing is ever said twice; if the neural voice can't produce the first audio in
+// time, the WHOLE reply goes to the phone voice instead. On a slow device with 'Kokoro always' the reply is rendered
+// far enough ahead that gaps stay under ~1 s.
+const estDur = (t, sp) => Math.max(.6, t.length / 13.5 / (sp || 1));     // seconds of speech, rough
+function Speech(onStart, opts) {
+  opts = opts || {};
+  const my = ++speakTok, eng = pickEngine(opts.force);
+  const E = eng === 'kokoro' ? Neural : eng === 'piper' ? Piper : null;
+  const v = eng === 'kokoro' ? nvoice() : eng === 'piper' ? pvoice() : null;
+  const sp = eng === 'kokoro' ? S.rate * (v.speed || 1) : S.rate;
+  const t0 = performance.now();
+  let buf = '', ended = false, begun = false, wake = null, all = [], npieces = 0;
+  const q = [];
+  const kick = () => { if (wake) { const w = wake; wake = null; w(); } };
+  const waitMore = () => new Promise(r => { wake = r; });
+  const add = piece => {
+    const t = cleanText(piece); if (!t || !/[a-z0-9]/i.test(t)) return;
+    // Kokoro: split a long first sentence at a comma so the first audio comes sooner
+    if (eng === 'kokoro' && npieces === 0 && t.length > 42) { const c = t.slice(12, t.length - 10).search(/[,;:—–]\s/); if (c >= 0) { add2(t.slice(0, c + 13)); add2(t.slice(c + 13)); return; } }
+    add2(t);
+  };
+  const add2 = t => { t = t.trim(); if (!t) return; npieces++; all.push(t); q.push({ text: t, p: E ? E.gen(t, v, sp) : null }); if (q[q.length - 1].p) q[q.length - 1].p.catch(() => {}); kick(); };
+  const split = final => {   // complete sentences = end punctuation followed by a space (or the end of the reply)
+    let m; const re = /^(\s*[\s\S]{6,}?[.!?…]+["')\]]*)\s+(?=\S|$)/;
+    while ((m = buf.match(re))) { buf = buf.slice(m[0].length); add(m[1]); }
+    if (final && buf.trim()) { add(buf); buf = ''; }
+  };
+  const begin = () => { if (!begun) { begun = true; console.log(`[gibson] voice: ${eng}${E ? ' (' + E.backend + ')' : ''}, first audio ${Math.round(performance.now() - t0)} ms after the first words arrived`); onStart && onStart(eng); } };
+  const playPhone = async text => { await Filler.wait(); if (my !== speakTok) return; begin(); Wake.echo(true, text); await G.speak(text, speakOpts()); };
+  const done = (async () => {
+    try {
+      let i = 0;
+      if (E) {
+        const slow = eng === 'kokoro' && (Neural.rtf || 1) > 0.9;           // slow device, user chose Kokoro: buffer ahead
+        const deadline = performance.now() + (S.vEngine === 'auto' ? 6000 : 20000);
+        let fallback = false;
+        // first audio: wait for it (with a deadline), plus enough lead time on slow devices
+        while (!begun && !fallback) {
+          if (my !== speakTok) return;
+          if (!q.length) { if (ended) return; await waitMore(); continue; }
+          if (slow && !ended) { await waitMore(); continue; }
+          const left = deadline - performance.now();
+          let r = null; try { r = await Promise.race([q[0].p, new Promise(res => setTimeout(() => res(null), Math.max(0, left)))]); } catch (e) { r = null; }
+          if (my !== speakTok) return;
+          if (!r) { fallback = true; break; }
+          if (slow) {   // start only when the rest will be ready before the buffered audio runs out
+            let k = 0, buffered = r.audio.length / r.sr;
+            while (k < q.length - 1 && Neural.rtf * q.slice(k + 1).reduce((a, x) => a + estDur(x.text, sp), 0) > buffered + 0.8) {
+              const left2 = deadline - performance.now(); let r2 = null;
+              try { r2 = await Promise.race([q[k + 1].p, new Promise(res => setTimeout(() => res(null), Math.max(0, left2)))]); } catch (e) {}
+              if (my !== speakTok) return; if (!r2) { fallback = true; break; }
+              k++; buffered += r2.audio.length / r2.sr;
+            }
+            if (fallback) break;
+          }
+          break;
+        }
+        if (fallback) {   // nothing has been said yet: drop the neural render and say ALL of it with the phone voice
+          E.cancel(); console.log(`[gibson] ${eng} voice not ready in time, phone voice for this WHOLE reply`);
+          status(`The ${E.name} voice was too slow for this reply; used the phone voice.`);
+          while (!ended) { await waitMore(); if (my !== speakTok) return; }
+          return await playPhone(all.join(' '));
+        }
+        for (;;) {
+          if (my !== speakTok) return;
+          if (i >= q.length) { if (ended) break; await waitMore(); continue; }
+          const it = q[i++]; let r;
+          try { r = await it.p; } catch (e) { console.warn('[gibson] voice render failed: ' + e.message); continue; }   // skip, never switch engines mid-reply
+          if (my !== speakTok) return;
+          await Filler.wait(); if (my !== speakTok) return;
+          begin(); Wake.echo(true, it.text); await AudioOut.play(r.audio, r.sr);
+        }
+      } else {
+        for (;;) {   // phone voice: speak each sentence as soon as it is complete
+          if (my !== speakTok) return;
+          if (i >= q.length) { if (ended) break; await waitMore(); continue; }
+          await playPhone(q[i++].text);
+        }
+      }
+    } finally { if (my === speakTok) Wake.echo(false); }
+  })();
+  return {
+    eng, done,
+    push(t) { if (ended) return; buf += t; split(false); },
+    end() { if (ended) return; split(true); ended = true; kick(); }
+  };
 }
+// Speak a whole text. Resolves the moment the last audio ends, so the conversation can continue immediately.
+async function speakOut(text, onStart, force) { const sp = Speech(onStart, { force }); sp.push(text); sp.end(); await sp.done; }
 
 // ------------------------------------------------------------------ conversation flow
 // busy: null | 'listening' | 'thinking' | 'speaking'. reqId cancels stale work when the user interrupts.
@@ -447,25 +635,45 @@ async function ask(text) {
   stopRec(); stopSpeech(); clearTimeout(backTimer);
   setBusy('thinking'); G.think(true); Head.look(0.4, -0.3);
   Wake.resume(true);                                        // detector stays on while thinking/speaking, so "Hey Gibson" can interrupt
+  Filler.arm(my);                                           // "Hmm." if the answer takes a moment
   const t0 = performance.now();
-  const res = await brain(text);
-  if (my !== reqId) return { cancelled: true };            // user tapped / spoke again meanwhile
-  const { expr, text: reply } = parseReply(res.raw);
-  status(`You: ${text}\nGibson [${expr}] via ${PROVIDERS[res.provider] ? PROVIDERS[res.provider].label : res.provider} (${Math.round(performance.now() - t0)} ms): ${reply}` + (res.errors.length ? `\nFell back after: ${res.errors.join(' | ')}` : ''));
-  await respond(reply, expr, my);
+  let sp = null, head = '', expr = 'happy';
+  const onStart = () => { if (my === reqId) { setBusy('speaking'); G.setExpression(expr, 350); Head.lookAt(0, 0); Head.express(expr); } };
+  // streamed reply: read the [expression] tag from the first words, then hand every piece to the voice as it arrives
+  const onText = d => {
+    if (my !== reqId) return;
+    if (sp) return sp.push(d);
+    head += d; const h = head.replace(/^\s+/, '');
+    if (/^[\[(]/.test(h) && !/[\])]/.test(h) && h.length < 30) return;            // tag not closed yet
+    const m = h.match(/^\s*[\[(]\s*([a-zA-Z _-]{2,24})\s*[\])]\s*[:\-]?\s*/);
+    if (m) expr = parseReply(m[0] + 'x').expr;
+    sp = Speech(onStart); sp.push(m ? h.slice(m[0].length) : h);
+  };
+  const res = await brain(text, onText);
+  if (my !== reqId) return { cancelled: true };            // user tapped / spoke again meanwhile (their stopSpeech already silenced this reply)
+  const { expr: ex, text: reply } = parseReply(res.raw);
+  if (!sp) { expr = ex; sp = Speech(onStart); sp.push(reply); }
+  sp.end();
+  status(`You: ${text}\nGibson [${expr}] via ${PROVIDERS[res.provider] ? PROVIDERS[res.provider].label : res.provider}${res.live ? ' + web search' : ''} (${Math.round(performance.now() - t0)} ms, voice: ${sp.eng}): ${reply}` + (res.errors.length ? `\nFell back after: ${res.errors.join(' | ')}` : ''));
+  await sp.done;
+  if (my !== reqId) return { cancelled: true };
+  afterSpeech();
   return { expr, reply, provider: res.provider, errors: res.errors };
+}
+function afterSpeech() {
+  setBusy(null);
+  backTimer = setTimeout(() => { if (!busy) G.setExpression('smile', 900); }, 2200);   // only a timer; never blocks the mic
+  if (Convo.on) { Convo.idleSince = Date.now(); startCommand(false, true); }   // next turn right away, no wake word
+  else resumeListening();
 }
 async function respond(text, expr, my) {
   if (my == null) my = ++reqId;
   stopRec(); clearTimeout(backTimer);
   setBusy('speaking'); Wake.resume(true);
-  // keep the thinking face until the first audio actually starts, then switch straight to the reply's expression (no flicker)
+  // keep the current face until the first audio actually starts, then switch straight to the reply's expression (no flicker)
   await speakOut(text, () => { if (my === reqId) { G.setExpression(expr, 350); Head.lookAt(0, 0); Head.express(expr); } });
   if (my !== reqId) return;
-  setBusy(null);
-  backTimer = setTimeout(() => { if (!busy) G.setExpression('smile', 900); }, 2200);   // only a timer; never blocks the mic
-  if (Convo.on) { Convo.idleSince = Date.now(); startCommand(false, true); }   // next turn right away, no wake word
-  else resumeListening();
+  afterSpeech();
 }
 
 // ------------------------------------------------------------------ voice in: Web Speech API, one clean session at a time
@@ -499,6 +707,10 @@ function runCommand(my, attempt) {
     for (let i = e.resultIndex; i < e.results.length; i++) { const tr = e.results[i][0].transcript; if (e.results[i].isFinal) finalText += tr; else interim += tr; }
     G.setListenLevel(.8); Convo.idleSince = Date.now();
     if (cont && finalText.trim()) { try { r.stop(); } catch (x) {} }
+    clearTimeout(r._settle);
+    if (!finalText.trim() && interim.trim().split(/\s+/).length >= 2) r._settle = setTimeout(() => {   // words stopped changing: don't wait for the slow final
+      if (rec === r && !finalText.trim() && interim.trim()) { finalText = interim; interim = ''; try { r.stop(); } catch (x) {} }
+    }, 1100);
   };
   r.onspeechstart = () => { G.setListenLevel(.6); Convo.idleSince = Date.now(); };
   r.onerror = e => { err = e.error; if (e.error === 'not-allowed' || e.error === 'service-not-allowed') status('Microphone blocked: allow mic access for this site (lock icon in the address bar).'); else if (e.error === 'network') status('Speech recognition needs internet on this phone (network error).'); };
@@ -685,11 +897,11 @@ async function goFullscreen() {
   try { if (screen.orientation && screen.orientation.lock) await screen.orientation.lock('landscape'); } catch (e) {}
 }
 function start() {
-  if (started) return; started = true;
+  if (started) return; started = true; window.GIBSON_STARTED = true;
   $('#start').hidden = true;
   try { const u = new SpeechSynthesisUtterance(' '); u.volume = 0; speechSynthesis.speak(u); } catch (e) {}   // unlocks TTS on iOS
   AudioOut.init();                                   // unlock Web Audio inside the tap
-  goFullscreen(); keepAwake(); Neural.ensure();
+  goFullscreen(); keepAwake(); ensureVoices();
   respond(pick(["Hi Lenny! I'm awake. Tap my face whenever you want to talk.", 'Hello Lenny! Mini Gibson, online and glowing. Tap me to chat.']), 'happy');
 }
 $('#start').addEventListener('click', start);
@@ -733,8 +945,9 @@ function syncUI() {
   document.querySelectorAll('.card[data-p]').forEach(c => c.classList.toggle('primary', c.dataset.p === S.primary));
   document.querySelectorAll('[data-ok]').forEach(s => { s.textContent = usable(s.dataset.ok) ? '● ready' : ''; });
   $('#voice').value = S.voice; $('#rate').value = S.rate; $('#pitch').value = S.pitch; $('#rateV').textContent = (+S.rate).toFixed(2); $('#pitchV').textContent = (+S.pitch).toFixed(2);
-  $('#vEngine').value = S.vEngine; $('#nVoice').value = nvoice().id; $('#robot').checked = S.robot; $('#nDevice').value = S.nDevice;
-  $('#nDevice').querySelector('[value=webgpu]').disabled = !('gpu' in navigator); showVoiceState();
+  $('#vEngine').value = S.vEngine; $('#nVoice').value = nvoice().id; $('#pVoice').value = pvoice().id; $('#robot').checked = S.robot; $('#filler').checked = S.filler;
+  $('#nDevice').value = S.nDevice === 'webgpu' ? 'auto' : S.nDevice;
+  $('#nDevice').querySelectorAll('[value^=webgpu]').forEach(o => { o.disabled = !('gpu' in navigator); }); showVoiceState();
   $('#convo').checked = S.convo; $('#convoTimeout').value = S.convoTimeout; $('#ctoV').textContent = S.convoTimeout + ' s';
   $('#wakeEngine').value = S.wakeEngine; $('#wakeSens').value = S.wakeSens; $('#sensV').textContent = (+S.wakeSens).toFixed(2);
   $('#lang').value = S.lang; $('#wake').checked = S.wake; $('#wake').disabled = !SR && !window.AudioWorkletNode;
@@ -758,10 +971,12 @@ function bindSettings() {
     else if (el.id === 'lang') S.lang = el.value.trim() || 'en-US';
     else if (el.id === 'wake') { S.wake = el.checked; if (!S.wake) Wake.off(); }
     else if (el.id === 'persona') { S.persona = el.value; history.length = 0; }
-    else if (el.id === 'vEngine') { S.vEngine = el.value; if (S.vEngine !== 'browser') Neural.ensure(); }
-    else if (el.id === 'nVoice') { S.nVoice = el.value; if (Neural.w) Neural.w.postMessage({ type: 'prefetch', voice: nvoice() }); }
+    else if (el.id === 'vEngine') { S.vEngine = el.value; if (S.vEngine === 'neural') Neural.forceLoad = true; if (Neural.state === 'skipped') Neural.state = 'off'; if (started) ensureVoices(); }
+    else if (el.id === 'nVoice') { S.nVoice = el.value; if (Neural.w) Neural.w.postMessage({ type: 'prefetch', voice: nvoice() }); Filler.prep(); }
+    else if (el.id === 'pVoice') { S.pVoice = el.value; if (Piper.w) Piper.w.postMessage({ type: 'prefetch', voice: pvoice() }); Filler.prep(); }
+    else if (el.id === 'filler') S.filler = el.checked;
     else if (el.id === 'robot') { S.robot = el.checked; AudioOut.setRobot(S.robot); }
-    else if (el.id === 'nDevice') { S.nDevice = el.value; Neural.noGpu = false; Neural.rtf = null; try { localStorage.removeItem('gibson.rtf'); } catch (e) {} if (Neural.w) { Neural.fail('switching engine'); Neural.ensure(); } }
+    else if (el.id === 'nDevice') { S.nDevice = el.value; Neural.noGpu = Neural.noF16 = false; Neural.forceLoad = true; if (Neural.w) Neural.fail('switching engine'); if (started && S.vEngine !== 'browser' && S.vEngine !== 'piper') Neural.ensure(); }
     else if (el.id === 'wakeEngine') { S.wakeEngine = el.value; Wake.failed = false; }
     else if (el.id === 'convo') { S.convo = el.checked; if (!S.convo) Convo.exit(); }
     else if (el.id === 'convoTimeout') S.convoTimeout = +el.value;
@@ -773,13 +988,13 @@ function bindSettings() {
     else if (el.id === 'headUrl') S.headUrl = el.value.trim();
     else return;
     save(); applyDisplay();
-    if (['primary', 'rate', 'pitch', 'head', 'wake', 'wakeSens', 'convoTimeout', 'wakeEngine', 'vEngine'].includes(el.id) || el.dataset.key) syncUI();
+    if (['primary', 'rate', 'pitch', 'head', 'wake', 'wakeSens', 'convoTimeout', 'wakeEngine', 'vEngine', 'nDevice', 'pVoice'].includes(el.id) || el.dataset.key) syncUI();
   });
   $('#settings').addEventListener('click', async e => {
     const b = e.target.closest('button'); if (!b) return;
     if (b.id === 'sClose') closeSettings();
     else if (b.id === 'chatGo') { const v = $('#chatIn').value; $('#chatIn').value = ''; ask(v); }
-    else if (b.id === 'testVoice') { AudioOut.init(); Neural.ensure(); stopSpeech(); speakOut('Hello Lenny! I am Gibson. I polished my pixels just for you, and I am ready for anything.', () => G.setExpression('happy', 300), S.vEngine !== 'browser').then(() => setTimeout(() => G.setExpression('smile', 600), 800)); }
+    else if (b.id === 'testVoice') { AudioOut.init(); ensureVoices(); stopSpeech(); const f = { neural: 'kokoro', piper: 'piper' }[S.vEngine]; speakOut('Hello Lenny! I am Gibson. I polished my pixels just for you, and I am ready for anything.', () => G.setExpression('happy', 300), f).then(() => setTimeout(() => G.setExpression('smile', 600), 800)); }
     else if (b.id === 'clearKeys') { if (confirm('Remove all API keys from this phone?')) { S.keys = Object.assign({}, DEFAULTS.keys); S.customUrl = ''; save(); syncUI(); status('Keys cleared.'); } }
     else if (b.id === 'fs') goFullscreen();
     else if (b.id === 'faceDbg') { closeSettings(); G.debug(true); }
@@ -795,8 +1010,9 @@ function bindSettings() {
 
 // ------------------------------------------------------------------ boot
 $('#nVoice').innerHTML = NEURAL_VOICES.map(v => `<option value="${v.id}">${v.name}</option>`).join('');
+$('#pVoice').innerHTML = PIPER_VOICES.map(v => `<option value="${v.id}">${v.name}</option>`).join('');
 bindSettings(); syncUI(); applyDisplay();
 G.idle(true); G.setExpression('smile', 0);
-if ('serviceWorker' in navigator && location.protocol !== 'file:') navigator.serviceWorker.register('sw.js').catch(() => {});
-window.GibsonApp = { ask, respond, Convo, isExit, parseReply, brain, startCommand, speakOut, stopSpeech, Neural, Wake, AudioOut, NEURAL_VOICES, state: () => ({ busy, convo: Convo.on, rec: recMode, neural: Neural.state, neuralMsg: Neural.msg, rtf: Neural.rtf, wake: Wake.on, wakeReady: Wake.ready, wakeFailed: Wake.failed }), settings: () => JSON.parse(JSON.stringify(Object.assign({}, S, { keys: '(hidden)' }))), Head, version: VERSION };
+// service worker: registered early in index.html (it also makes the page cross-origin isolated)
+window.GibsonApp = { ask, respond, Convo, isExit, parseReply, brain, startCommand, speakOut, stopSpeech, Neural, Piper, Speech, Filler, pickEngine, nvoice, pvoice, Wake, AudioOut, NEURAL_VOICES, PIPER_VOICES, state: () => ({ busy, convo: Convo.on, rec: recMode, neural: Neural.state, neuralMsg: Neural.msg, rtf: Neural.rtf, kokoroBackend: Neural.backend, piper: Piper.state, piperMsg: Piper.msg, piperRtf: Piper.rtf, engine: pickEngine(), coi: self.crossOriginIsolated, wake: Wake.on, wakeReady: Wake.ready, wakeFailed: Wake.failed }), settings: () => JSON.parse(JSON.stringify(Object.assign({}, S, { keys: '(hidden)' }))), Head, version: VERSION };
 })();
