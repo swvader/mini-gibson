@@ -12,7 +12,7 @@ const DEFAULTS = {
   keys: { grok: '', gemini: '', openai: '', meta: '', custom: '' },
   models: { grok: 'grok-4.20-0309-non-reasoning', gemini: 'gemini-flash-latest', openai: 'gpt-6-luna', meta: 'muse-spark-1.1', custom: '' },
   customUrl: '', voice: '', rate: 1.0, pitch: 1.1, lang: 'en-US', wake: false,
-  persona: 'andrew', vEngine: 'auto', nVoice: 'gibson', pVoice: 'norman', filler: true, robot: false, nDevice: 'auto', wakeEngine: 'ondevice', wakeSens: 0.5, convo: true, convoTimeout: 25,
+  persona: 'andrew', vEngine: 'auto', nVoice: 'gibson', pVoice: 'norman', filler: true, robot: false, nDevice: 'auto', wakeEngine: 'ondevice', wakeSens: 0.5, convo: true, convoTimeout: 25, endPause: 1.4,
   robotOffset: false, safe: false, head: false, headTransport: 'websocket', headUrl: ''
 };
 function load() {
@@ -290,7 +290,11 @@ const coi = () => (self.crossOriginIsolated ? 'mt' : 'st');
 const rtfKey = (eng, cfg) => `gibson.rtf2.${eng}.${cfg}.${coi()}`;
 const getRtf = k => { const v = +localStorage.getItem(k); return v > 0 ? v : null; };
 const setRtf = (k, v) => { try { localStorage.setItem(k, v.toFixed(3)); } catch (e) {} };
-const KOKORO_FAST = 0.5;     // Auto uses Kokoro only if it renders 2x faster than real time (first words in ~1-2 s)
+// (phone detection: only for information now; Kokoro stays the default voice everywhere)
+const IS_PHONE = /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent) || (navigator.maxTouchPoints > 1 && Math.min(screen.width, screen.height) < 820);
+// while any voice is being generated, cap the face at 30 fps so rendering and generation don't fight (no visible loss)
+let genBusy = 0;
+function genCount(d) { genBusy = Math.max(0, genBusy + d); if (G.setFpsCap) G.setFpsCap(genBusy ? 30 : 0); }
 const Neural = {
   name: 'Kokoro', w: null, state: 'off', msg: '', id: 0, epoch: 0, pend: new Map(), rtf: null, dev: null, cfg: '', gpuName: '',
   async pickDevice() {   // auto: WebGPU (fp16 if the GPU supports it, else fp32) on a real GPU; else CPU (WASM q8)
@@ -310,8 +314,6 @@ const Neural = {
     this.starting = true;
     try {
       this.dev = await this.pickDevice(); this.cfg = this.dev.device + '-' + this.dev.dtype; this.rtf = getRtf(rtfKey('kokoro', this.cfg));
-      // Auto: if Kokoro was measured too slow on this exact setup before, don't load it (it would only compete with Piper)
-      if (S.vEngine === 'auto' && this.rtf && this.rtf > KOKORO_FAST * 2 && !this.forceLoad) { this.state = 'skipped'; this.msg = `${this.cfg} too slow here last time (${this.rtf.toFixed(2)}× real-time)`; showVoiceState(); return; }
       this.state = 'loading'; this.msg = 'starting ' + this.cfg + '…'; showVoiceState();
       try { this.w = new Worker('tts-worker.js', { type: 'module' }); }
       catch (e) { this.state = 'error'; this.msg = e.message; showVoiceState(); return; }
@@ -322,18 +324,20 @@ const Neural = {
   },
   fail(msg) {
     this.state = 'error'; this.msg = msg; showVoiceState();
-    for (const p of this.pend.values()) p.rej(new Error(msg)); this.pend.clear();
+    for (const p of this.pend.values()) p.rej(new Error(msg)); this.pend.clear();   // (each rejection also releases the fps cap)
     try { this.w && this.w.terminate(); } catch (e) {} this.w = null;
   },
   onmsg(m) {
     if (m.type === 'progress') { this.msg = `downloading ${this.cfg} ${Math.round(100 * m.loaded / m.total)}% of ${Math.round(m.total / 1e6)} MB`; showVoiceState(); }
     else if (m.type === 'ready') {
-      this.state = 'ready'; this.backend = `${m.device} ${m.dtype}${m.device === 'webgpu' ? ' (' + this.gpuName + ')' : m.threads ? ', multi-thread' : ', single-thread'}`;
+      this.state = 'ready'; this.backend = `${m.device} ${m.dtype}${m.device === 'webgpu' ? ' (' + this.gpuName + ')' : m.threads ? ', ' + (m.threads === true ? 'multi' : m.threads) + ' threads' : ', single-thread'}`;
       this.msg = 'ready · ' + this.backend; console.log('[gibson] Kokoro backend: ' + this.backend + ', loaded in ' + m.ms + ' ms'); showVoiceState();
       this.w.postMessage({ type: 'prefetch', voice: nvoice() });
       // measure this phone's speed (2nd run counts; the 1st includes warm-up) so Auto can pick the right engine
+      // these silent renders also pre-warm the model (GPU shaders compiled for short, medium and long inputs) before the first reply
       this.gen('Hi.', nvoice(), 1, 1).catch(() => {});
-      this.gen('Hello there, Lenny. Nice to see you.', nvoice(), 1, 2).then(() => { Filler.prep(); showVoiceState(); }).catch(() => {});
+      this.gen('Hello there, Lenny. Nice to see you.', nvoice(), 1, 2).catch(() => {});
+      this.gen('I polished my pixels just for you, and I am ready for anything you want to build today.', nvoice(), 1, 1).catch(() => {}).then(() => { Filler.prep(); showVoiceState(); });
     }
     else if (m.type === 'loaderror') {
       if (this.dev && this.dev.device === 'webgpu') {
@@ -353,7 +357,9 @@ const Neural = {
   },
   gen(text, voice, speed, bench) {
     if (!this.w) return Promise.reject(new Error(this.name + ' not loaded'));
-    return new Promise((res, rej) => { const id = ++this.id; this.pend.set(id, { res, rej, bench }); this.w.postMessage({ type: 'gen', id, text, voice, speed, epoch: this.epoch }); });
+    genCount(1);
+    return new Promise((res, rej) => { const id = ++this.id; this.pend.set(id, { res, rej, bench }); this.w.postMessage({ type: 'gen', id, text, voice, speed, epoch: this.epoch, bench }); })
+      .finally(() => genCount(-1));
   },
   cancel() { this.epoch++; if (this.w) this.w.postMessage({ type: 'cancel', epoch: this.epoch }); }
 };
@@ -379,7 +385,7 @@ const Piper = Object.assign(Object.create(Neural), {
     else if (m.type === 'ready') {
       this.state = 'ready'; this.backend = `wasm, ${m.threads} thread${m.threads > 1 ? 's' : ''}`; this.msg = 'ready · ' + this.backend;
       console.log('[gibson] Piper backend: ' + this.backend + ', loaded in ' + m.ms + ' ms'); showVoiceState();
-      this.gen('Hello there, Lenny. Nice to see you.', pvoice(), 1, 2).then(() => { Filler.prep(); showVoiceState(); }).catch(() => {});
+      this.gen('Hello there, Lenny. Nice to see you.', pvoice(), 1, 2).catch(() => {}).then(() => { Filler.prep(); showVoiceState(); });
     }
     else if (m.type === 'loaderror') this.fail('load failed: ' + m.msg);
     else if (m.type === 'audio' || m.type === 'error') {
@@ -400,15 +406,13 @@ function pickEngine(force) {
   if (S.vEngine === 'browser') return 'phone';
   if (S.vEngine === 'neural') return k ? 'kokoro' : 'phone';
   if (S.vEngine === 'piper') return p ? 'piper' : 'phone';
-  if (k && Neural.rtf != null && Neural.rtf <= KOKORO_FAST) return 'kokoro';    // auto: best voice if this phone is fast enough
-  if (p) return 'piper';                                                        // else the fast neural voice
-  if (k && Neural.rtf != null && Neural.rtf <= 1) return 'kokoro';
-  return 'phone';                                                               // last resort while voices load
+  if (k) return 'kokoro';                                                       // auto: Gibson's own voice (Kokoro blends)
+  if (p) return 'piper';                                                        // optional extra, only if it was chosen before
+  return 'phone';                                                               // only while Kokoro is still loading
 }
 function ensureVoices() {
   if (S.vEngine === 'browser') return;
-  if (S.vEngine !== 'neural') Piper.ensure();
-  if (S.vEngine !== 'piper') Neural.ensure();
+  if (S.vEngine === 'piper') Piper.ensure(); else Neural.ensure();             // Piper is an optional extra; Kokoro is the default
 }
 function showVoiceState() {
   const el = $('#nState'); if (!el) return;
@@ -486,7 +490,7 @@ const Filler = {
     for (const [eng, E, v] of [['kokoro', Neural, nvoice()], ['piper', Piper, pvoice()]]) {
       const k = this.key(eng); if (E.state !== 'ready' || this.clips.has(k)) continue;
       this.clips.set(k, null);
-      E.gen('Hmm.', v, eng === 'kokoro' ? (v.speed || 1) : 1, 1).then(m => this.clips.set(k, { a: trimSilence(m.audio, m.sr), sr: m.sr })).catch(() => this.clips.delete(k));
+      E.gen('Hmm.', v, eng === 'kokoro' ? (v.speed || 1) : 1, .5).then(m => this.clips.set(k, { a: trimSilence(m.audio, m.sr), sr: m.sr })).catch(() => this.clips.delete(k));
     }
   },
   arm(my, ms) {
@@ -647,12 +651,13 @@ async function ask(text) {
     if (/^[\[(]/.test(h) && !/[\])]/.test(h) && h.length < 30) return;            // tag not closed yet
     const m = h.match(/^\s*[\[(]\s*([a-zA-Z _-]{2,24})\s*[\])]\s*[:\-]?\s*/);
     if (m) expr = parseReply(m[0] + 'x').expr;
+    clearTimeout(Filler.t);                                 // words are arriving: no "Hmm" needed
     sp = Speech(onStart); sp.push(m ? h.slice(m[0].length) : h);
   };
   const res = await brain(text, onText);
   if (my !== reqId) return { cancelled: true };            // user tapped / spoke again meanwhile (their stopSpeech already silenced this reply)
   const { expr: ex, text: reply } = parseReply(res.raw);
-  if (!sp) { expr = ex; sp = Speech(onStart); sp.push(reply); }
+  if (!sp) { clearTimeout(Filler.t); expr = ex; sp = Speech(onStart); sp.push(reply); }
   sp.end();
   status(`You: ${text}\nGibson [${expr}] via ${PROVIDERS[res.provider] ? PROVIDERS[res.provider].label : res.provider}${res.live ? ' + web search' : ''} (${Math.round(performance.now() - t0)} ms, voice: ${sp.eng}): ${reply}` + (res.errors.length ? `\nFell back after: ${res.errors.join(' | ')}` : ''));
   await sp.done;
@@ -663,7 +668,10 @@ async function ask(text) {
 function afterSpeech() {
   setBusy(null);
   backTimer = setTimeout(() => { if (!busy) G.setExpression('smile', 900); }, 2200);   // only a timer; never blocks the mic
-  if (Convo.on) { Convo.idleSince = Date.now(); startCommand(false, true); }   // next turn right away, no wake word
+  if (Convo.on) {                                          // next turn, no wake word: once his voice has fully finished (+250 ms)
+    Convo.idleSince = Date.now(); const my = reqId;
+    setTimeout(() => { if (my === reqId && !busy && Convo.on) startCommand(false, true); }, 250);
+  }
   else resumeListening();
 }
 async function respond(text, expr, my) {
@@ -685,57 +693,90 @@ function stopRec() {
   if (rec) { const r = rec; rec = null; recMode = null; r.onend = r.onresult = r.onerror = null; try { r.abort(); } catch (e) {} }
   $('#mic').classList.remove('on'); clearTimeout(stopRec.wd);
 }
+// Android Chrome beeps on every recognizer start, so automatic restarts are rationed: at most 3 per minute (per user),
+// with growing back-off. A user tap or the wake word always starts a fresh turn.
+const limiter = { cmd: [], wake: [] };
+function canRestart(k) { const a = limiter[k], now = Date.now(); while (a.length && now - a[0] > 60000) a.shift(); return a.length < 3; }
+function noteRestart(k) { limiter[k].push(Date.now()); return 300 * 2 ** (limiter[k].length - 1); }   // back-off: 0.3, 0.6, 1.2 s
 // startCommand(fromWake, auto): user tap / wake word / automatic next turn in conversation mode
 function startCommand(fromWake, auto) {
   if (!SR) { status('Speech recognition is not available in this browser. Type in Settings → Talk to Gibson.'); G.setExpression('confused'); Convo.exit(); return; }
   const my = ++reqId;                                      // interrupts thinking/speaking
-  const micWasOpen = !!Wake.stream;
-  stopSpeech(); Wake.pause(); stopRec(); clearTimeout(backTimer);
+  const micWasOpen = !!Wake.stream || Wake.opening;
+  stopSpeech(); Wake.pause(); stopRec(); clearTimeout(backTimer); clearTimeout(wakeTimer);
   Convo.enter(); if (!auto) Convo.idleSince = Date.now();
   setBusy('listening'); G.listen(true); $('#mic').classList.add('on'); Head.lookAt(0, -0.1);
-  // the recognizer needs the mic: if the wake detector just had it, give Android a moment to release it
-  const go = () => { if (my === reqId && busy === 'listening') runCommand(my, 0); };
-  micWasOpen ? setTimeout(go, 150) : go();
+  // the recognizer needs the mic: the wake detector's mic is closed above; give Android a moment to release it
+  const go = () => { if (my === reqId && busy === 'listening') runCommand(my); };
+  micWasOpen ? setTimeout(go, 350) : go();
 }
-function runCommand(my, attempt) {
-  const r = new SR(); rec = r; recMode = 'command';
-  const cont = Convo.on;                                   // conversation turns: continuous session, finish on the first final phrase
-  r.lang = S.lang || 'en-US'; r.interimResults = true; r.continuous = cont; r.maxAlternatives = 1;
-  let finalText = '', interim = '', err = ''; const t0 = Date.now();
-  r.onresult = e => {
-    interim = '';
-    for (let i = e.resultIndex; i < e.results.length; i++) { const tr = e.results[i][0].transcript; if (e.results[i].isFinal) finalText += tr; else interim += tr; }
-    G.setListenLevel(.8); Convo.idleSince = Date.now();
-    if (cont && finalText.trim()) { try { r.stop(); } catch (x) {} }
-    clearTimeout(r._settle);
-    if (!finalText.trim() && interim.trim().split(/\s+/).length >= 2) r._settle = setTimeout(() => {   // words stopped changing: don't wait for the slow final
-      if (rec === r && !finalText.trim() && interim.trim()) { finalText = interim; interim = ''; try { r.stop(); } catch (x) {} }
-    }, 1100);
-  };
-  r.onspeechstart = () => { G.setListenLevel(.6); Convo.idleSince = Date.now(); };
-  r.onerror = e => { err = e.error; if (e.error === 'not-allowed' || e.error === 'service-not-allowed') status('Microphone blocked: allow mic access for this site (lock icon in the address bar).'); else if (e.error === 'network') status('Speech recognition needs internet on this phone (network error).'); };
-  r.onend = () => {
-    if (rec !== r) return;
-    rec = null; recMode = null; $('#mic').classList.remove('on'); clearTimeout(stopRec.wd);
+// One turn = one recognition session (continuous, interim results). Finals are collected; the turn ends on OUR silence
+// timer (no new words for S.endPause s, default 1.4) or an exit phrase,
+// then the session is stopped once. If Android ends the session by itself mid-sentence it is restarted once, quietly
+// keeping the words so far; if it ends with no speech it is restarted at most once per turn (conversation mode only).
+function mergeFinal(list, t) {   // Android sometimes repeats earlier text in later results: keep the longest version
+  t = t.trim(); if (!t) return; const last = list[list.length - 1];
+  if (last) { const a = last.toLowerCase(), b = t.toLowerCase(); if (b.startsWith(a)) { list[list.length - 1] = t; return; } if (a.startsWith(b) || a.endsWith(b)) return; }
+  list.push(t);
+}
+function runCommand(my) {
+  const turn = { prev: '', fins: [], interim: '', lastHeard: 0, restarts: 0, quiet: 0, done: false, t0: Date.now(), endT: 0 };
+  const text = () => [turn.prev, turn.fins.join(' '), turn.interim].join(' ').replace(/\s+/g, ' ').trim();
+  const finish = why => {
+    if (turn.done) return; turn.done = true; clearTimeout(turn.endT); clearTimeout(stopRec.wd);
+    const said = text().replace(WAKE_RE, ' ').replace(/\s+/g, ' ').trim();
+    stopRec();                                             // stop the session once (handlers are detached first: no restart)
     if (my !== reqId) return;
-    const said = (finalText || interim).replace(WAKE_RE, ' ').replace(/\s+/g, ' ').trim();
     if (said) { ask(said); return; }                       // ask() switches listening -> thinking directly
-    const fatal = /not-allowed|service-not-allowed|network|audio-capture|language-not-supported/.test(err);
-    if (!fatal && Convo.on) {
-      if (Convo.left() > 0) {                              // still inside the silence window: keep listening
-        const quick = Date.now() - t0 < 800; runCommand.quick = quick ? (runCommand.quick || 0) + 1 : 0;
-        if (runCommand.quick < 6) { setTimeout(() => { if (my === reqId && busy === 'listening') runCommand(my, 0); }, quick ? 300 : 0); $('#mic').classList.add('on'); return; }
-      }
-      chime(false); status('Conversation ended after ' + S.convoTimeout + ' s of silence.'); toStandby('neutral'); return;
-    }
-    if (err === 'aborted' && attempt < 1) { setTimeout(() => { if (my === reqId) runCommand(my, attempt + 1); }, 300); return; }
-    toStandby(null);
+    if (Convo.on) { chime(false); status(why === 'error' ? 'Listening stopped (speech recognition error).' : 'Conversation ended: no speech.'); toStandby('neutral'); }
+    else toStandby(null);
   };
-  try { r.start(); }
-  catch (e) { rec = null; recMode = null; if (attempt < 1) return setTimeout(() => { if (my === reqId) runCommand(my, attempt + 1); }, 300); status('Mic start failed: ' + e.message); toStandby(null); return; }
-  $('#mic').classList.add('on');
-  const wd = cont ? Math.max(3000, Convo.left() + 1000) : 12000;
-  stopRec.wd = setTimeout(() => { if (rec === r) try { r.stop(); } catch (e) {} }, wd);   // watchdog: never stuck "listening"
+  const armEnd = ms => { clearTimeout(turn.endT); turn.endT = setTimeout(() => finish('pause'), ms); };
+  const session = () => {
+    const r = new SR(); rec = r; recMode = 'command';
+    r.lang = S.lang || 'en-US'; r.interimResults = true; r.continuous = true; r.maxAlternatives = 1;
+    let err = '';
+    turn.fins = []; turn.interim = '';
+    r.onresult = e => {
+      const fins = [], ints = [];
+      for (let i = 0; i < e.results.length; i++) { const t = e.results[i][0].transcript; if (e.results[i].isFinal) mergeFinal(fins, t); else ints.push(t); }
+      turn.fins = fins; turn.interim = ints.join(' ').trim();
+      if (!text()) return;
+      turn.lastHeard = Date.now(); Convo.idleSince = Date.now(); G.setListenLevel(.8);
+      if (fins.length && !turn.interim && isExit(text())) return finish('exit');
+      const pause = Math.max(.8, S.endPause || 1.4) * 1000;
+      armEnd(pause);                                       // Android marks phrases final on short pauses: don't trust that, use our own timer
+    };
+    r.onspeechstart = () => { G.setListenLevel(.6); Convo.idleSince = Date.now(); };
+    r.onerror = e => { err = e.error; if (e.error === 'not-allowed' || e.error === 'service-not-allowed') status('Microphone blocked: allow mic access for this site (lock icon in the address bar).'); else if (e.error === 'network') status('Speech recognition needs internet on this phone (network error).'); };
+    r.onend = () => {                                      // the session ended by itself (we didn't call finish)
+      if (rec !== r) return; rec = null; recMode = null;
+      if (turn.done || my !== reqId) return;
+      turn.prev = text(); turn.fins = []; turn.interim = '';
+      const fatal = /not-allowed|service-not-allowed|network|language-not-supported|aborted/.test(err);
+      if (turn.prev) {                                     // he was talking: restart once if the last words were very recent
+        if (!fatal && Date.now() - turn.lastHeard < 1500 && turn.restarts < 1 && canRestart('cmd')) {
+          turn.restarts++; const d = noteRestart('cmd'); armEnd(d + 2500);
+          setTimeout(() => { if (!turn.done && my === reqId) start(); }, d); return;
+        }
+        return finish('ended');
+      }
+      if (!fatal && Convo.on && Convo.left() > 3000 && turn.quiet < 1 && canRestart('cmd')) {   // nothing yet: one more try per turn
+        turn.quiet++; const d = noteRestart('cmd'); setTimeout(() => { if (!turn.done && my === reqId) start(); }, d); return;
+      }
+      finish(fatal ? 'error' : 'silence');
+    };
+    return r;
+  };
+  const start = () => {
+    const r = session();
+    try { r.start(); $('#mic').classList.add('on'); }
+    catch (e) { rec = null; recMode = null; status('Mic start failed: ' + e.message); finish('error'); }
+  };
+  start();
+  // watchdog: never stuck listening (silence window in conversation mode, 10 s for a single question; 40 s max per turn)
+  const wd = () => { if (turn.done || my !== reqId) return; if (!text() && Date.now() - turn.t0 > (Convo.on ? Math.max(4000, Convo.left()) : 10000)) return finish('silence'); if (Date.now() - turn.t0 > 40000) return finish('long'); stopRec.wd = setTimeout(wd, 500); };
+  stopRec.wd = setTimeout(wd, 500);
 }
 function cancelListening() { reqId++; stopRec(); toStandby(null); }
 
@@ -848,7 +889,10 @@ function startWakeSR() {
     if (rec !== r) return; rec = null; recMode = null;
     if (armed) { clearTimeout(armT); return fire(''); }   // said "hey gibson" then the session ended: open a fresh command session
     if (wakeFails > 8) { status('Browser wake word keeps failing (network?). Tap to talk still works.'); Wake.off(); return; }
-    clearTimeout(wakeTimer); wakeTimer = setTimeout(startWakeSR, heard ? 200 : Math.min(8000, 400 + wakeFails * 1200));
+    // each restart beeps on Android: at most 3 per minute, then this fallback pauses (tap to talk, or use the on-device wake word)
+    if (!canRestart('wake')) { status('Browser wake word paused: Android beeps on every restart. Tap to talk, or pick the on-device wake word in Settings.'); Wake.off(); return; }
+    const d = noteRestart('wake');
+    clearTimeout(wakeTimer); wakeTimer = setTimeout(startWakeSR, Math.max(d, heard ? 200 : Math.min(8000, 400 + wakeFails * 1200)));
   };
   try { r.start(); } catch (e) { rec = null; recMode = null; wakeFails++; clearTimeout(wakeTimer); wakeTimer = setTimeout(startWakeSR, 1500); }
 }
@@ -949,6 +993,7 @@ function syncUI() {
   $('#nDevice').value = S.nDevice === 'webgpu' ? 'auto' : S.nDevice;
   $('#nDevice').querySelectorAll('[value^=webgpu]').forEach(o => { o.disabled = !('gpu' in navigator); }); showVoiceState();
   $('#convo').checked = S.convo; $('#convoTimeout').value = S.convoTimeout; $('#ctoV').textContent = S.convoTimeout + ' s';
+  $('#endPause').value = S.endPause; $('#epV').textContent = (+S.endPause).toFixed(1) + ' s';
   $('#wakeEngine').value = S.wakeEngine; $('#wakeSens').value = S.wakeSens; $('#sensV').textContent = (+S.wakeSens).toFixed(2);
   $('#lang').value = S.lang; $('#wake').checked = S.wake; $('#wake').disabled = !SR && !window.AudioWorkletNode;
   $('#wakeNote').textContent = (S.wakeEngine === 'ondevice' ? 'Runs on this phone; no audio leaves it until you say “Hey Gibson”. Then the phone\'s speech recognizer takes your question (one beep on Android). Raise sensitivity if he misses you, lower it if he wakes by himself. Screen must stay on with the app open.' : 'Fallback: uses the browser speech service continuously; Android may beep when it restarts.') + (isIOS ? ' iPhone: keep the app open in front; Siri/Dictation must be enabled for the question part.' : '');
@@ -980,6 +1025,7 @@ function bindSettings() {
     else if (el.id === 'wakeEngine') { S.wakeEngine = el.value; Wake.failed = false; }
     else if (el.id === 'convo') { S.convo = el.checked; if (!S.convo) Convo.exit(); }
     else if (el.id === 'convoTimeout') S.convoTimeout = +el.value;
+    else if (el.id === 'endPause') S.endPause = +el.value;
     else if (el.id === 'wakeSens') { S.wakeSens = +el.value; if (Wake.worker) Wake.worker.postMessage({ type: 'threshold', v: 1 - S.wakeSens }); }
     else if (el.id === 'robotOffset') S.robotOffset = el.checked;
     else if (el.id === 'safe') S.safe = el.checked;
@@ -988,7 +1034,7 @@ function bindSettings() {
     else if (el.id === 'headUrl') S.headUrl = el.value.trim();
     else return;
     save(); applyDisplay();
-    if (['primary', 'rate', 'pitch', 'head', 'wake', 'wakeSens', 'convoTimeout', 'wakeEngine', 'vEngine', 'nDevice', 'pVoice'].includes(el.id) || el.dataset.key) syncUI();
+    if (['primary', 'rate', 'pitch', 'head', 'wake', 'wakeSens', 'convoTimeout', 'endPause', 'wakeEngine', 'vEngine', 'nDevice', 'pVoice'].includes(el.id) || el.dataset.key) syncUI();
   });
   $('#settings').addEventListener('click', async e => {
     const b = e.target.closest('button'); if (!b) return;

@@ -4,7 +4,8 @@ import * as ort from './wake/ort.wasm.min.mjs';
 import { textToIds } from './piper-core.js';
 const HF = 'https://huggingface.co/rhasspy/piper-voices/resolve/main/';
 ort.env.wasm.wasmPaths = new URL('./wake/', import.meta.url).href;
-ort.env.wasm.numThreads = self.crossOriginIsolated ? Math.max(1, Math.min(4, (navigator.hardwareConcurrency || 4) - 1)) : 1;
+// leave at least 2 cores free for the face, audio and the browser
+ort.env.wasm.numThreads = self.crossOriginIsolated ? Math.max(1, Math.min(4, (navigator.hardwareConcurrency || 4) - 2)) : 1;
 const voices = new Map();   // id -> {s: InferenceSession, cfg}
 async function getBuf(url, report) {
   let c = null;

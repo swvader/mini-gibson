@@ -15,7 +15,7 @@ class FakeSR { constructor() { this.continuous = false; this.interimResults = fa
   stop() { this._end(); } abort() { this._end(); } }
 window.SpeechRecognition = window.webkitSpeechRecognition = FakeSR;
 window.__bl = []; const __t0 = window.__t0 = Date.now(); setInterval(() => { const b = document.body && document.body.dataset.busy || '-'; if (window.__bl[window.__bl.length-1]?.[1] !== b) window.__bl.push([((Date.now()-__t0)/1000).toFixed(1), b]); }, 20);
-window.__phoneSpeak = 0; const _sp = speechSynthesis.speak.bind(speechSynthesis); speechSynthesis.speak = u => { if (u.text.trim()) window.__phoneSpeak++; return _sp(u); };
+window.__phoneSpeak = 0; addEventListener('load', () => { const g = window.Gibson, sp = g.speak.bind(g); g.speak = (t, o) => { if (String(t).trim() && !(o && o.silent)) window.__phoneSpeak++, (window.__phoneTurns = window.__phoneTurns || new Set()).add((window.__bl || []).length); return sp(t, o); }; });
 '''
 errs, logs = [], []
 def ok(c, msg): print(('PASS ' if c else 'FAIL ') + msg, flush=True)
@@ -59,9 +59,10 @@ with sync_playwright() as p:
     print('   status:', pg.inner_text('#status'))
     # 4) barge-in by wake word while speaking
     pg.wait_for_timeout(1800)
-    pg.evaluate("window.__sr.queue.push('tell me a joke', 'stop listening')"); pg.evaluate(FEED, 'pos_af_heart')
-    s = wait(lambda s: s['busy'] == 'speaking', 20000)
-    pg.wait_for_timeout(2200)    # let the detector warm up while he talks
+    pg.evaluate("window.__sr.queue.push('stop listening')")
+    pg.evaluate("GibsonApp.Convo.enter(); GibsonApp.Neural.rtf = 0.3; void GibsonApp.respond('Once upon a time. There was a small robot with a red neon face. He lived on a desk next to a window. Every morning he watched the sun come up and counted the birds. He liked counting birds very much, and he told everyone about it. One day a new bird arrived.', 'happy')")
+    s = wait(lambda s: s['busy'] == 'speaking', 20000); pg.wait_for_function('!!GibsonApp.AudioOut.src', timeout=20000)
+    pg.wait_for_timeout(1500)   # detector warm-up while he talks
     speaking_before = st()['busy'] == 'speaking'
     pg.evaluate("window.__sr.queue.unshift(null)")   # the barge-in listen hears nothing at first
     mark = pg.evaluate('(Date.now() - window.__t0) / 1000')
@@ -92,6 +93,8 @@ with sync_playwright() as p:
     ok(not s['convo'] and s['busy'] is None, f'silence: conversation ended by itself after {time.time() - t2:.1f}s (timeout set to 10s)')
     print('   SR sessions:', pg.evaluate('window.__sr.log'))
     fb = len([l for l in logs if 'phone voice for this WHOLE reply' in l]); print('   neural timing:', [l[9:] for l in logs if 'neural:' in l])
-    ok(pg.evaluate('window.__phoneSpeak') <= 1 + fb, f"no reply spoken twice / no engine switching (phone-voice utterances: {pg.evaluate('window.__phoneSpeak')}, only the start greeting may use it)")
+    pt = pg.evaluate('window.__phoneTurns ? window.__phoneTurns.size : 0')
+    ok(pt <= 1 + fb, f"no engine switching mid-reply (replies using the phone voice: {pt} = start greeting + {fb} whole-reply fallbacks allowed; {pg.evaluate('window.__phoneSpeak')} phone sentences)")
+    print('   phone-voice lines:', [l[:120] for l in logs if 'voice: phone' in l or 'WHOLE' in l])
     b.close()
 print('ERRORS:', json.dumps(errs, indent=1))

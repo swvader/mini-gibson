@@ -91,16 +91,16 @@ if ('serviceWorker' in navigator && location.protocol !== 'file:') {
   <h2>Voice</h2>
   <div class="grid">
    <div class="card"><h3><span>Gibson's voice</span><small class="ok" id="nState"></small></h3>
-    <label>Engine <select id="vEngine"><option value="auto">Auto: Gibson voice (Kokoro) if this phone is fast enough, else Piper, phone voice last</option><option value="neural">Kokoro always (Gibson blends; may be slow on some phones)</option><option value="piper">Piper always (fast neural voice)</option><option value="browser">Phone voice (instant, robotic)</option></select></label>
+    <label>Engine <select id="vEngine"><option value="auto">Auto: Gibson voice (Kokoro); phone voice only while it loads</option><option value="neural">Kokoro always (never the phone voice, even if slow)</option><option value="piper">Piper (optional extra: very fast, different voice)</option><option value="browser">Phone voice (instant, robotic)</option></select></label>
     <label>Kokoro voice <select id="nVoice"></select></label>
     <label>Piper voice <select id="pVoice"></select></label>
     <label class="chk"><input type="checkbox" id="robot"> Robot-warm effect (subtle metallic shimmer)</label>
     <label>Speed <span id="rateV"></span><input type="range" id="rate" min="0.6" max="1.6" step="0.05"></label>
     <label class="chk"><input type="checkbox" id="filler"> Say “Hmm.” while thinking</label>
-    <label>Kokoro runs on <select id="nDevice"><option value="auto">Auto (GPU if this phone has one, else CPU)</option><option value="webgpu-fp16">GPU fp16 (163 MB once)</option><option value="webgpu-fp32">GPU fp32 (326 MB once, most compatible)</option><option value="webgpu-q8">GPU q8 (92 MB once, experimental)</option><option value="wasm">CPU q8 (92 MB once)</option></select></label>
+    <label>Kokoro runs on <select id="nDevice"><option value="auto">Auto (GPU if this phone has one, else CPU)</option><option value="webgpu-fp16">GPU fp16 (163 MB once)</option><option value="webgpu-fp32">GPU fp32 (326 MB once, most compatible)</option><option value="webgpu-q8">GPU q8 (92 MB once, experimental)</option><option value="wasm">CPU q8, multi-thread (92 MB once; try this if the face stutters)</option></select></label>
     <button id="testVoice" class="go">Test voice</button>
     <pre id="engInfo" style="white-space:pre-wrap;font-size:11px;opacity:.75;margin:6px 0 0"></pre>
-    <small id="nNote">Voices download once (use Wi-Fi: Piper 63 MB, Kokoro 92-326 MB), then work offline. Auto times each voice on this phone and picks the best one that can start talking fast. Until they're ready, Gibson uses the phone voice.</small></div>
+    <small id="nNote">Voices download once (use Wi-Fi: Piper 63 MB, Kokoro 92-326 MB), then work offline. Kokoro is pre-warmed at start so the first reply doesn't stutter. Until they're ready, Gibson uses the phone voice.</small></div>
    <div class="card"><h3><span>Phone voice (fallback)</span></h3>
     <label>Voice <select id="voice"></select></label>
     <label>Pitch <span id="pitchV"></span><input type="range" id="pitch" min="0.5" max="1.8" step="0.05"></label>
@@ -114,6 +114,7 @@ if ('serviceWorker' in navigator && location.protocol !== 'file:') {
    <div class="card"><h3><span>Conversation mode</span></h3>
     <label class="chk"><input type="checkbox" id="convo"> Keep listening after each reply (no wake word needed between turns)</label>
     <label>End after silence <span id="ctoV"></span><input type="range" id="convoTimeout" min="10" max="60" step="5"></label>
+    <label>Wait after you stop talking <span id="epV"></span><input type="range" id="endPause" min="0.8" max="3" step="0.1"></label>
     <small>Say “stop listening”, “that's all”, “never mind” or “bye Gibson” to end it. Interrupt him any time by tapping the screen or saying “Hey Gibson”.</small></div>
   </div>
 

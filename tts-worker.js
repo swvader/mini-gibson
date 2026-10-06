@@ -1,7 +1,9 @@
 // Gibson neural voice worker: Kokoro-82M (Apache-2.0) via kokoro-js / transformers.js.
 // Runs off the main thread so the face animation never stutters while audio is generated.
 // Voices can be single Kokoro voicepacks or weighted BLENDS of them (original "Gibson" voices).
-import { KokoroTTS } from './vendor/kokoro.web.js';
+import { KokoroTTS, env } from './vendor/kokoro.web.js';
+// CPU (WASM) threads: leave at least 2 cores for the face, audio and the browser ('onnx' getter added to the vendored bundle)
+try { env.onnx.wasm.numThreads = self.crossOriginIsolated ? Math.max(1, Math.min(4, (navigator.hardwareConcurrency || 4) - 2)) : 1; } catch (e) {}
 const MODEL = 'onnx-community/Kokoro-82M-v1.0-ONNX';
 const vurl = n => `https://huggingface.co/${MODEL}/resolve/main/voices/${n}.bin`;
 let tts = null, loading = null;
@@ -40,25 +42,34 @@ async function load({ device, dtype }) {
     for (const x of r.audio) { if (!Number.isFinite(x)) bad++; else pk = Math.max(pk, Math.abs(x)); }
     if (bad || pk < .01) { tts = null; throw new Error('GPU produced invalid audio'); }
   }
-  return { device, dtype, ms: Math.round(performance.now() - t0), threads: self.crossOriginIsolated };
+  return { device, dtype, ms: Math.round(performance.now() - t0), threads: self.crossOriginIsolated ? (env.onnx && env.onnx.wasm.numThreads) || true : 0 };
 }
-let queue = Promise.resolve(), minEpoch = 0;
+// real reply chunks jump ahead of the start-up warm-up renders; queued warm-ups are dropped once a reply needs the voice
+let minEpoch = 0, running = false;
+const jobs = [];
+async function pump() {
+  if (running) return; running = true;
+  while (jobs.length) {
+    const m = jobs.shift();
+    if ((m.epoch || 0) < minEpoch) { postMessage({ type: 'error', id: m.id, msg: 'cancelled' }); continue; }
+    try {
+      await loading; curStyle = await styleFor(m.voice);
+      const t0 = performance.now();
+      const r = await tts.generate(m.text, { voice: m.voice.lang || 'a', speed: m.speed || 1 });
+      const audio = new Float32Array(r.audio);
+      postMessage({ type: 'audio', id: m.id, audio, sr: r.sampling_rate, ms: Math.round(performance.now() - t0) }, [audio.buffer]);
+    } catch (err) { postMessage({ type: 'error', id: m.id, msg: String(err && err.message || err) }); }
+  }
+  running = false;
+}
 self.onmessage = e => {
   const m = e.data;
   if (m.type === 'load') {
     if (!loading) loading = load(m).catch(err => { loading = null; throw err; });
     loading.then(info => postMessage({ type: 'ready', ...info }), err => postMessage({ type: 'loaderror', msg: String(err && err.message || err) }));
   } else if (m.type === 'gen') {
-    queue = queue.then(async () => {
-      if ((m.epoch || 0) < minEpoch) return postMessage({ type: 'error', id: m.id, msg: 'cancelled' });
-      try {
-        await loading; curStyle = await styleFor(m.voice);
-        const t0 = performance.now();
-        const r = await tts.generate(m.text, { voice: m.voice.lang || 'a', speed: m.speed || 1 });
-        const audio = new Float32Array(r.audio);
-        postMessage({ type: 'audio', id: m.id, audio, sr: r.sampling_rate, ms: Math.round(performance.now() - t0) }, [audio.buffer]);
-      } catch (err) { postMessage({ type: 'error', id: m.id, msg: String(err && err.message || err) }); }
-    });
+    if (!m.bench) for (let i = jobs.length - 1; i >= 0; i--) if (jobs[i].bench >= 1) { postMessage({ type: 'error', id: jobs[i].id, msg: 'skipped warm-up' }); jobs.splice(i, 1); }
+    jobs.push(m); pump();
   } else if (m.type === 'cancel') { minEpoch = m.epoch;
   } else if (m.type === 'prefetch') { styleFor(m.voice).catch(() => {}); }
 };

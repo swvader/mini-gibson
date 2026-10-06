@@ -38,12 +38,8 @@ Head movement (ESP32) is off by default; see the `Head` object in app.js.
 - **Piper** (piper-worker.js + piper-core.js + vendor/phonemizer.js + wake/ort.wasm.min.mjs): fast VITS voices on the CPU, with eSpeak-NG phonemes (the same as piper-phonemize).
   - Voices: Norman and John by Bryce Beattie (https://brycebeattie.com/files/tts/). Both are public domain and were trained only on public-domain LibriVox recordings; Norman was trained from scratch and John was fine-tuned from Kristin, which is also public domain. Models load from huggingface.co/rhasspy/piper-voices.
   - Avoided: voices that are fine-tuned from lessac, whose Blizzard 2013 dataset license is restrictive, and voices on NC datasets (ryan, hfc_*, l2arctic).
-- **Auto** (default) times each engine on the phone (and remembers it per backend):
-  1. Kokoro, if it renders at least 2× faster than real time.
-  2. Otherwise Piper.
-  3. The phone voice only while nothing else is loaded.
-
-  If Kokoro was measured clearly too slow on this exact setup, Auto doesn't even load it.
+- **Auto** (default) uses Kokoro, the Gibson blends, on every device. The phone voice is only used while Kokoro is still loading, or for a single reply if Kokoro can't start it within 6 s. Piper is an optional extra (Lenny prefers Kokoro). Kokoro is pre-warmed at start with three silent renders (short, medium and long), which also compiles the GPU shaders before the first reply.
+- **Face smoothness:** while any voice is being generated, the face is capped at 30 fps and refreshes its big bloom layer every other frame (tools/build.py hook `Gibson.setFpsCap`). CPU voice workers use at most cores-2 threads (max 4).
 - **Streaming:** Gemini uses `streamGenerateContent` (SSE) and the OpenAI-style providers use `stream: true`. The voice starts on the first finished sentence while the rest is still arriving.
   - Thinking is set to minimal (`thinkingLevel: minimal`, `thinkingBudget: 0` on 2.5 Flash, `low` where minimal isn't allowed), and the setting that works is cached per model.
   - `google_search` is only sent when the question sounds live (news, scores, prices, hours, today, latest, ...). Weather still comes from Open-Meteo.

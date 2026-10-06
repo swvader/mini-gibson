@@ -480,9 +480,10 @@ function render() {
   // blur passes
   const FH = s0 * 1250;   // bloom radius follows face size (= screen height in the 80% landscape layout)
   const rA = FH * th.bloom.a.blur * ka, kb = th.bloom.b.scale, rB = FH * th.bloom.b.blur * kb;
-  bactx.clearRect(0, 0, bA.width, bA.height); bbctx.clearRect(0, 0, bB.width, bB.height);
+  const skipA = FPS_CAP && (++blurTick & 1);   // while capped: refresh the full-size bloom every other frame (soft glow, not visible)
+  if (!skipA) bactx.clearRect(0, 0, bA.width, bA.height); bbctx.clearRect(0, 0, bB.width, bB.height);
   if (FILTER_OK) {
-    bactx.filter = `blur(${rA.toFixed(2)}px)`; bactx.drawImage(bSrc, 0, 0); bactx.filter = 'none';
+    if (!skipA) { bactx.filter = `blur(${rA.toFixed(2)}px)`; bactx.drawImage(bSrc, 0, 0); bactx.filter = 'none'; }
     bbctx.filter = `blur(${rB.toFixed(2)}px)`; bbctx.drawImage(bSrc, 0, 0, bB.width, bB.height); bbctx.filter = 'none';
   } else { bactx.drawImage(bSrc, 0, 0); bbctx.drawImage(bSrc, 0, 0, bB.width, bB.height); }
   // ---- composite
@@ -834,10 +835,12 @@ addEventListener('pointerdown', e => {   // tap the top-left corner to toggle th
 });
 
 // ---------------------------------------------------------------- main loop
-let last = performance.now(), fpsAcc = 0, fpsN = 0;
+let last = performance.now(), fpsAcc = 0, fpsN = 0, FPS_CAP = 0, lastDraw = 0, blurTick = 0;
 function frame(now) {
   requestAnimationFrame(frame);
   if (S.manual) return;
+  if (FPS_CAP && now - lastDraw < 1000 / FPS_CAP - 4) return;
+  lastDraw = now;
   const dt = Math.min(.05, Math.max(0, (now - last) / 1000)); last = now;
   update(dt); render();
   fpsAcc += dt; fpsN++;
@@ -847,7 +850,7 @@ document.addEventListener('visibilitychange', () => { last = performance.now(); 
 let slowN = 0;
 function autoQuality() {   // if the device can't hold ~60 fps, render fewer pixels (glow hides the softness)
   if (!CFG.autoQuality || document.hidden || S.t < 3) return;
-  slowN = S.fps < 48 ? slowN + 1 : 0;
+  slowN = S.fps < (FPS_CAP ? FPS_CAP * .8 : 48) ? slowN + 1 : 0;   // while capped, 'slow' means below the cap
   if (slowN >= 4 && CFG.renderScale > .55) { CFG.renderScale = Math.round((CFG.renderScale - .15) * 100) / 100; slowN = 0; W = H = 0; resize(); emit({ event: 'quality', renderScale: CFG.renderScale }); }
 }
 
@@ -857,6 +860,7 @@ const API = {
   mouthText: (text, ms) => speak(text, { silent: true, durationMs: ms }),
   setListenLevel: v => { S.listenLevel = Math.max(S.listenLevel, clamp(+v || 0, 0, 1)); },
   config, receive, debug: toggleDebug,
+  setFpsCap: n => { FPS_CAP = Math.max(0, +n || 0); fpsAcc = 0; fpsN = 0; },
   get expressions() { return Object.keys(EXPRESSIONS); }, get tour() { return TOUR.slice(); }, get labels() { return Object.assign({}, LABELS); },
   get themes() { return Object.keys(THEMES); },
   get state() { return { expression: S.base, thinking: S.thinkOn, listening: S.listenOn, idle: S.idleOn, speaking: !!S.talk || S.mouth.k > .05, demo: !!S.demo, fps: Math.round(S.fps), caption: S.caption, t: S.t }; },
