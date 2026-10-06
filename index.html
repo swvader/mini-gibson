@@ -116,7 +116,8 @@ if ('serviceWorker' in navigator && location.protocol !== 'file:' && !window.Gib
    <div class="card native-only"><h3><span>Phone app</span></h3>
     <label class="chk"><input type="checkbox" id="quietMic"> Quiet listening (mute the phone's mic beeps)</label>
     <label class="chk"><input type="checkbox" id="faceTrack"> Face tracking (Gibson's eyes follow you; uses the front camera)</label>
-    <small>Ask “what do you see?” or “what am I holding?” and Gibson looks through the camera (needs a Gemini key).</small></div>
+    <small>Ask “what do you see?” or “what am I holding?” and Gibson looks through the camera (needs a Gemini key).</small>
+    <pre id="natDiag" style="white-space:pre-wrap;font-size:11px;opacity:.75;margin:6px 0 0"></pre></div>
    <div class="card"><h3><span>Conversation mode</span></h3>
     <label class="chk"><input type="checkbox" id="convo"> Keep listening after each reply (no wake word needed between turns)</label>
     <label>End after silence <span id="ctoV"></span><input type="range" id="convoTimeout" min="10" max="60" step="5"></label>

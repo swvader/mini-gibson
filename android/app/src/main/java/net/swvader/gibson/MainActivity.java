@@ -75,11 +75,12 @@ public class MainActivity extends ComponentActivity {
   final ExecutorService ttsExec = Executors.newSingleThreadExecutor();
   final ExecutorService camExec = Executors.newSingleThreadExecutor();
   OfflineTts tts; int ttsThreads;
-  SpeechRecognizer sr; boolean srWanted, srContinuous, srQuiet = true, srHadResult; String srLang = "en-US"; int srRestarts;
+  SpeechRecognizer sr; boolean srStarted, srWanted, srContinuous, srQuiet = true, srHadResult; String srLang = "en-US"; int srRestarts;
   final List<String> srFinals = new ArrayList<>();
   AudioManager am; boolean muted;
   TextToSpeech phone; boolean phoneReady; final List<Runnable> phonePending = new ArrayList<>();
-  ProcessCameraProvider camProvider; FaceDetector faceDet; volatile boolean faceBusy; volatile int snapWanted = 0; long lastFaceSent, lastFaceSeen;
+  ProcessCameraProvider camProvider; ImageAnalysis analysis; FaceDetector faceDet; volatile boolean faceBusy, faceOn; volatile int snapWanted = 0; long lastFaceSent, lastFaceSeen;
+  volatile String lastJpeg; volatile long lastJpegAt; volatile int camFrames; volatile String camErr = ""; int srRetry;
 
   @Override protected void onCreate(Bundle b) {
     super.onCreate(b);
@@ -223,7 +224,7 @@ public class MainActivity extends ComponentActivity {
     sr.startListening(i);
   }
   void srEnded(String error) {   // the platform session is over: restart quietly in continuous mode, else tell JS
-    if (srWanted && srContinuous && srRestarts < 30 && (srHadResult || error == null) && !"not-allowed".equals(error) && !"network".equals(error) && !"audio-capture".equals(error)) {
+    if (srWanted && srContinuous && srRestarts < 40 && (error == null || "no-speech".equals(error) || (srHadResult && "aborted".equals(error)))) {
       srRestarts++; main.postDelayed(() -> { if (srWanted) srBegin(); }, 60); return;
     }
     boolean was = srWanted; srWanted = false;
@@ -238,7 +239,7 @@ public class MainActivity extends ComponentActivity {
     return a;
   }
   final RecognitionListener listener = new RecognitionListener() {
-    public void onReadyForSpeech(Bundle p) { if (srRestarts == 0) emit("sr", J("type", "start")); }
+    public void onReadyForSpeech(Bundle p) { srRetry = 0; if (!srStarted) { srStarted = true; emit("sr", J("type", "start")); } }
     public void onBeginningOfSpeech() { emit("sr", J("type", "speechstart")); }
     public void onRmsChanged(float v) {}
     public void onBufferReceived(byte[] b) {}
@@ -250,10 +251,16 @@ public class MainActivity extends ComponentActivity {
         case SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS: m = "not-allowed"; break;
         case SpeechRecognizer.ERROR_NETWORK: case SpeechRecognizer.ERROR_NETWORK_TIMEOUT: case SpeechRecognizer.ERROR_SERVER: m = "network"; break;
         case SpeechRecognizer.ERROR_AUDIO: m = "audio-capture"; break;
-        case SpeechRecognizer.ERROR_RECOGNIZER_BUSY: if (sr != null) { sr.destroy(); sr = null; } m = "aborted"; break;
         default: m = "aborted";
       }
       if (!srWanted) { main.postDelayed(unmuteR, 400); return; }
+      // transient: the mic hasn't been released yet (wake detector / last session) or the service is busy. Retry quietly.
+      boolean transientErr = e == SpeechRecognizer.ERROR_AUDIO || e == SpeechRecognizer.ERROR_CLIENT || e == SpeechRecognizer.ERROR_RECOGNIZER_BUSY || e == 10 || e == 11;
+      if (transientErr && srRetry < 5) {
+        srRetry++;
+        if (e != SpeechRecognizer.ERROR_AUDIO && sr != null) { try { sr.destroy(); } catch (Exception x) {} sr = null; }
+        main.postDelayed(() -> { if (srWanted) srBegin(); }, 250L + 200L * srRetry); return;
+      }
       srEnded(m);
     }
     public void onResults(Bundle r) {
@@ -274,66 +281,84 @@ public class MainActivity extends ComponentActivity {
   // ------------------------------------------------------------------ camera: face tracking + snapshots
   void camStart() {
     if (camProvider != null) return;
-    if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) { emit("cam", J("error", "camera permission")); return; }
-    faceDet = FaceDetection.getClient(new FaceDetectorOptions.Builder().setPerformanceMode(FaceDetectorOptions.PERFORMANCE_MODE_FAST).setMinFaceSize(0.12f).build());
+    if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) { camErr = "camera permission not granted"; emit("cam", J("error", camErr)); if (snapWanted > 0) { emit("snap", J("id", snapWanted, "error", camErr)); snapWanted = 0; } return; }
+    if (faceDet == null) faceDet = FaceDetection.getClient(new FaceDetectorOptions.Builder().setPerformanceMode(FaceDetectorOptions.PERFORMANCE_MODE_FAST).setMinFaceSize(0.12f).build());
     ListenableFuture<ProcessCameraProvider> f = ProcessCameraProvider.getInstance(this);
     f.addListener(() -> {
       try {
         camProvider = f.get();
-        ImageAnalysis an = new ImageAnalysis.Builder().setTargetResolution(new android.util.Size(640, 480))
+        ImageAnalysis an = analysis = new ImageAnalysis.Builder().setTargetResolution(new android.util.Size(640, 480))
           .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST).setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_RGBA_8888).build();
+        an.setTargetRotation(getWindowManager().getDefaultDisplay().getRotation());
         an.setAnalyzer(camExec, this::analyze);
         CameraSelector sel = camProvider.hasCamera(CameraSelector.DEFAULT_FRONT_CAMERA) ? CameraSelector.DEFAULT_FRONT_CAMERA : CameraSelector.DEFAULT_BACK_CAMERA;
         camProvider.unbindAll(); camProvider.bindToLifecycle(this, sel, an);
-        emit("cam", J("on", true));
-      } catch (Exception e) { camProvider = null; emit("cam", J("error", String.valueOf(e))); }
+        camErr = ""; emit("cam", J("on", true));
+      } catch (Exception e) { camProvider = null; camErr = String.valueOf(e); emit("cam", J("error", camErr)); }
     }, ContextCompat.getMainExecutor(this));
   }
-  void camStop() { if (camProvider != null) { camProvider.unbindAll(); camProvider = null; } emit("cam", J("on", false)); }
+  void camStop() { if (camProvider != null) { camProvider.unbindAll(); camProvider = null; } lastJpeg = null; emit("cam", J("on", false)); }
+  @Override public void onConfigurationChanged(android.content.res.Configuration c) {   // keep photos upright when the phone turns
+    super.onConfigurationChanged(c);
+    if (analysis != null) try { analysis.setTargetRotation(getWindowManager().getDefaultDisplay().getRotation()); } catch (Exception e) {}
+  }
   void analyze(ImageProxy img) {
-    int rot = img.getImageInfo().getRotationDegrees();
-    if (snapWanted > 0) {
-      int id = snapWanted; snapWanted = 0;
-      try {
-        Bitmap bm = img.toBitmap(); Matrix mx = new Matrix(); mx.postRotate(rot);
+    try {
+      camFrames++;
+      final int rot = img.getImageInfo().getRotationDegrees();
+      long now = System.currentTimeMillis();
+      boolean wantJpeg = snapWanted > 0 || now - lastJpegAt > 300;
+      boolean wantFace = faceOn && !faceBusy && now - lastFaceSent >= 90;
+      if (!wantJpeg && !wantFace) return;
+      Bitmap bm = img.toBitmap();
+      if (wantJpeg) {
+        Matrix mx = new Matrix(); mx.postRotate(rot);
         float sc = 640f / Math.max(bm.getWidth(), bm.getHeight()); if (sc < 1) mx.postScale(sc, sc);
         Bitmap out = Bitmap.createBitmap(bm, 0, 0, bm.getWidth(), bm.getHeight(), mx, true);
         ByteArrayOutputStream bo = new ByteArrayOutputStream(); out.compress(Bitmap.CompressFormat.JPEG, 70, bo);
-        emit("snap", J("id", id, "b64", Base64.encodeToString(bo.toByteArray(), Base64.NO_WRAP)));
-      } catch (Throwable e) { emit("snap", J("id", id, "error", String.valueOf(e))); }
-    }
-    long now = System.currentTimeMillis();
-    if (faceBusy || now - lastFaceSent < 90) { img.close(); return; }
-    faceBusy = true;
-    final int w = (rot % 180 == 0) ? img.getWidth() : img.getHeight(), h = (rot % 180 == 0) ? img.getHeight() : img.getWidth();
-    Bitmap bm;
-    try { bm = img.toBitmap(); } catch (Throwable e) { faceBusy = false; img.close(); return; }
-    img.close();
-    faceDet.process(InputImage.fromBitmap(bm, rot)).addOnSuccessListener(faces -> {
-      long t = System.currentTimeMillis(); lastFaceSent = t;
-      Face best = null; for (Face fc : faces) if (best == null || fc.getBoundingBox().width() > best.getBoundingBox().width()) best = fc;
-      if (best != null) {
-        Rect r = best.getBoundingBox(); lastFaceSeen = t;
-        double x = -((r.centerX() / (double) w) * 2 - 1), y = (r.centerY() / (double) h) * 2 - 1;   // front camera is mirrored: his left is our right
-        emit("face", J("x", Math.round(x * 100) / 100.0, "y", Math.round(y * 100) / 100.0, "s", Math.round(100.0 * r.width() / w) / 100.0));
-      } else if (t - lastFaceSeen > 1200 && lastFaceSeen != 0) { lastFaceSeen = 0; emit("face", J("none", true)); }
-    }).addOnCompleteListener(x -> faceBusy = false);
+        lastJpeg = Base64.encodeToString(bo.toByteArray(), Base64.NO_WRAP); lastJpegAt = now;
+        int id = snapWanted; if (id > 0) { snapWanted = 0; emit("snap", J("id", id, "b64", lastJpeg, "w", out.getWidth(), "h", out.getHeight())); }
+      }
+      if (wantFace) {
+        faceBusy = true;
+        final int w = (rot % 180 == 0) ? bm.getWidth() : bm.getHeight(), h = (rot % 180 == 0) ? bm.getHeight() : bm.getWidth();
+        faceDet.process(InputImage.fromBitmap(bm, rot)).addOnSuccessListener(faces -> {
+          long t = System.currentTimeMillis(); lastFaceSent = t;
+          Face best = null; for (Face fc : faces) if (best == null || fc.getBoundingBox().width() > best.getBoundingBox().width()) best = fc;
+          if (best != null) {
+            Rect r = best.getBoundingBox(); lastFaceSeen = t;
+            double x = -((r.centerX() / (double) w) * 2 - 1), y = (r.centerY() / (double) h) * 2 - 1;   // front camera: his left is our right
+            emit("face", J("x", Math.round(x * 100) / 100.0, "y", Math.round(y * 100) / 100.0, "s", Math.round(100.0 * r.width() / w) / 100.0));
+          } else if (t - lastFaceSeen > 1200 && lastFaceSeen != 0) { lastFaceSeen = 0; emit("face", J("none", true)); }
+        }).addOnCompleteListener(x -> faceBusy = false);
+      }
+    } catch (Throwable e) {
+      camErr = String.valueOf(e); faceBusy = false;
+      int id = snapWanted; if (id > 0) { snapWanted = 0; emit("snap", J("id", id, "error", camErr)); }
+    } finally { img.close(); }
   }
 
   // ------------------------------------------------------------------ JS bridge
   class Bridge {
-    @JavascriptInterface public String info() { return J("app", "1.0.1", "cores", Runtime.getRuntime().availableProcessors(), "model", "kokoro-int8-multi-lang-v1_0").toString(); }
+    @JavascriptInterface public String info() { return J("app", "1.0.2", "cores", Runtime.getRuntime().availableProcessors(), "model", "kokoro-int8-multi-lang-v1_0").toString(); }
     @JavascriptInterface public void ttsInit() { ttsExec.execute(MainActivity.this::ttsLoad); }
     @JavascriptInterface public void tts(int id, String text, int sid, float speed) { ttsExec.execute(() -> { if (tts == null) ttsLoad(); ttsGen(id, text, sid, speed); }); }
     @JavascriptInterface public void srStart(String lang, boolean continuous, boolean quiet) {
-      main.post(() -> { srLang = lang == null || lang.isEmpty() ? "en-US" : lang; srContinuous = continuous; srQuiet = quiet; srWanted = true; srHadResult = false; srRestarts = 0; srFinals.clear();
-        if (sr != null) { sr.destroy(); sr = null; } srBegin(); });   // fresh recognizer: no stale callbacks from the last session
+      main.post(() -> { srLang = lang == null || lang.isEmpty() ? "en-US" : lang; srContinuous = continuous; srQuiet = quiet; srWanted = true; srHadResult = false; srStarted = false; srRestarts = 0; srFinals.clear();
+        srRetry = 0; if (sr != null) sr.cancel(); srBegin(); });
     }
     @JavascriptInterface public void srStop() { main.post(() -> { boolean was = srWanted; srWanted = false; if (sr != null) sr.cancel(); main.postDelayed(unmuteR, 400); if (was) emit("sr", J("type", "end")); }); }
     @JavascriptInterface public void srAbort() { main.post(() -> { srWanted = false; if (sr != null) sr.cancel(); main.postDelayed(unmuteR, 400); }); }
-    @JavascriptInterface public void camStart() { main.post(MainActivity.this::camStart); }
-    @JavascriptInterface public void camStop() { main.post(MainActivity.this::camStop); }
-    @JavascriptInterface public void snap(int id) { main.post(() -> { if (camProvider == null) camStart(); snapWanted = id; }); }
+    @JavascriptInterface public void camStart() { main.post(() -> { faceOn = true; MainActivity.this.camStart(); }); }
+    @JavascriptInterface public void camStop() { main.post(() -> { faceOn = false; MainActivity.this.camStop(); }); }
+    @JavascriptInterface public void snap(int id) {
+      main.post(() -> {
+        String j = lastJpeg;
+        if (camProvider != null && j != null && System.currentTimeMillis() - lastJpegAt < 1500) { emit("snap", J("id", id, "b64", j)); return; }   // fresh photo: instant
+        snapWanted = id; if (camProvider == null) MainActivity.this.camStart();   // camera off: start it, the first frame answers
+      });
+    }
+    @JavascriptInterface public String camInfo() { return J("on", camProvider != null, "frames", camFrames, "photoAge", lastJpeg == null ? -1 : System.currentTimeMillis() - lastJpegAt, "face", faceOn, "err", camErr).toString(); }
     @JavascriptInterface public void say(int id, String text, float rate, float pitch) { main.post(() -> phoneSay(id, text, rate, pitch)); }
     @JavascriptInterface public void exit() { main.post(MainActivity.this::finish); }
   }

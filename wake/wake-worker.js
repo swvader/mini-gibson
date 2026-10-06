@@ -42,7 +42,8 @@ async function step(chunk) {               // chunk: 1280 samples (int16 scale)
   const eo = await emb.run({ input_1: new ort.Tensor('float32', win, [1, 76, 32, 1]) });
   feat.push(Float32Array.from(eo[emb.outputNames[0]].data)); while (feat.length > 16) feat.shift();
   frames++;
-  if (feat.length < 16 || frames < 20) return;   // warm-up (~1.6 s) so start-up noise never triggers
+  if (frames % 12 === 0) postMessage({ type: 'alive', frames });
+  if (feat.length < 16 || frames < 14) return;   // warm-up (~1.1 s) so start-up noise never triggers
   const v = new Float32Array(16 * 96); feat.forEach((e, i) => v.set(e, i * 96));
   const s = classify(v);
   if (s > 0.15) postMessage({ type: 'score', s });
@@ -69,5 +70,5 @@ self.onmessage = e => {
   else if (m.type === 'audio') onAudio(m.data);                      // test hook: feed samples directly
   else if (m.type === 'threshold') threshold = m.v;
   else if (m.type === 'stats') postMessage({ type: 'stats', stepMs, pending, threshold, need });
-  else if (m.type === 'pause') { paused = !!m.on; if (!paused) { frames = 0; feat = []; run = 0; } }
+  else if (m.type === 'pause') { paused = !!m.on; if (!paused) { frames = 0; feat = []; run = 0; cooldownUntil = 0; melBuf = []; for (let i = 0; i < 76; i++) melBuf.push(new Float32Array(32).fill(1)); } }
 };

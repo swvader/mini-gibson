@@ -186,12 +186,19 @@ async function brain(userText, onText) {
   let live = LIVE_RE.test(userText);
   const img = window.GibsonSnap && VISION_RE.test(userText) ? await window.GibsonSnap() : null;   // Android app: look through the camera
   if (img) live = false;   // camera questions: no web search (faster)
+  if (window.GibsonSnap && VISION_RE.test(userText)) {
+    Turn.photo = img ? `yes, ${Math.round(img.length * 3 / 4 / 1024)} KB` : 'no';
+    if (!img) {   // never answer as if he saw something
+      const raw = "[sad] My camera eyes didn't work just now, so I can't see anything. Check that Mini Gibson is allowed to use the camera, then ask me again.";
+      onText && onText(raw); remember('assistant', raw); return { raw, provider: 'camera', errors: ['no camera photo'], live: false };
+    }
+  } else Turn.photo = null;
   for (const id of chain()) {
     let got = '';
     try {
       const msgs = history.slice();
       if (wx && id !== 'demo') msgs[msgs.length - 1] = { role: 'user', content: `${userText}\n\n(${wx})` };
-      if (img && id !== 'demo') msgs[msgs.length - 1] = { role: 'user', content: msgs[msgs.length - 1].content + '\n\n(Attached: a photo from your camera eyes, taken just now. Describe or use what you see.)', image: img };
+      if (img && id !== 'demo') msgs[msgs.length - 1] = { role: 'user', content: msgs[msgs.length - 1].content + '\n\n(Attached: a photo taken a moment ago by your camera eyes, the phone\'s front camera, which faces the person talking to you. Look at it carefully and answer the actual question using what is really in the photo: name the concrete things you see (objects, colors, text, what the person is holding or wearing). 1 to 3 short sentences. Never make things up; if the photo is dark or blurry, say so.)', image: img };
       const raw = await callProvider(id, msgs, t => { got += t; onText && onText(t); }, live);
       remember('assistant', raw);
       return { raw, provider: id, errors, live };
@@ -665,7 +672,7 @@ async function signOff() {
 // last-turn timing, shown in Settings so real phone numbers can be screenshotted
 const Turn = { show() {
   const el = document.getElementById('timing'); if (!el) return; const f = x => x == null ? '–' : Math.round(x) + ' ms';
-  el.textContent = `Last turn: heard you → first AI words ${f(this.brain)} · first words → Gibson voice ${f(this.tts)} · total until he spoke ${f(this.total)}${this.filler ? ' · filler ' + this.filler.toFixed(1) + ' s' : ''}${this.vision ? ' · with camera photo' : ''}\nVoice speed: ${Neural.rtf ? 'real-time factor ' + Neural.rtf.toFixed(2) + (Neural.rtf < 1 ? ' (faster than real time)' : ' (slower than real time)') : '–'} · ${Neural.backend || Neural.msg || ''}`;
+  el.textContent = `Last turn: heard you → first AI words ${f(this.brain)} · first words → Gibson voice ${f(this.tts)} · total until he spoke ${f(this.total)}${this.filler ? ' · filler ' + this.filler.toFixed(1) + ' s' : ''}${this.vision ? ' · camera photo attached: ' + (this.photo || 'no') : ''}\nVoice speed: ${Neural.rtf ? 'real-time factor ' + Neural.rtf.toFixed(2) + (Neural.rtf < 1 ? ' (faster than real time)' : ' (slower than real time)') : '–'} · ${Neural.backend || Neural.msg || ''}`;
 } };
 async function ask(text) {
   text = String(text || '').trim(); if (!text) return;
@@ -836,7 +843,8 @@ const Wake = {
         const m = e.data;
         if (m.type === 'ready') { clearTimeout(to); this.ready = true; w.postMessage({ type: 'threshold', v: 1 - S.wakeSens }); res(); }
         else if (m.type === 'error' && m.fatal) { clearTimeout(to); rej(new Error(m.msg)); }
-        else if (m.type === 'score') { const el = $('#wMeter'); if (el) { el.style.width = Math.round(m.s * 100) + '%'; clearTimeout(this.mt); this.mt = setTimeout(() => { el.style.width = '0'; }, 400); } }
+        else if (m.type === 'alive') { this.alive = Date.now(); this.frames = m.frames; }
+        else if (m.type === 'score') { this.peak = Math.max(this.peak || 0, m.s); const el = $('#wMeter'); if (el) { el.style.width = Math.round(m.s * 100) + '%'; clearTimeout(this.mt); this.mt = setTimeout(() => { el.style.width = '0'; }, 400); } }
         else if (m.type === 'wake') this.onWake(m.s);
         else if (m.type === 'stats') this.stats = m;
         else if (m.type === 'slow') console.warn('[gibson] wake detector is falling behind on this phone (' + Math.round(m.ms) + ' ms per 80 ms frame)');
@@ -865,20 +873,29 @@ const Wake = {
       if (!this.on || busy === 'listening') { stream.getTracks().forEach(t => t.stop()); return; }  // paused while waiting for permission
       this.stream = stream;
       if (!this.ctx) { try { await this.buildCtx(16000); } catch (e) { await this.buildCtx(0); } }
-      if (this.ctx.state === 'suspended') await this.ctx.resume();
+      if (this.ctx.state !== 'running') { try { await Promise.race([this.ctx.resume(), new Promise(r => setTimeout(r, 1500))]); } catch (e) {} }
       if (!this.on || this.stream !== stream || busy === 'listening') { if (this.stream === stream) this.closeMic(); return; }
       try { this.srcNode = this.ctx.createMediaStreamSource(stream); }
       catch (e) { await this.buildCtx(0); this.srcNode = this.ctx.createMediaStreamSource(stream); }   // some browsers refuse a 16 kHz context for the mic
       this.srcNode.connect(this.node);
-      this.worker.postMessage({ type: 'pause', on: false });
+      this.worker.postMessage({ type: 'pause', on: false }); this.openedAt = Date.now(); this.alive = 0;
+      clearTimeout(this.dog); this.dog = setTimeout(() => this.checkAlive(stream), 3000);
     } finally { this.opening = false; }
   },
   closeMic() {
     if (this.worker) this.worker.postMessage({ type: 'pause', on: true });
     if (this.srcNode) { try { this.srcNode.disconnect(); } catch (e) {} this.srcNode = null; }
     if (this.stream) { this.stream.getTracks().forEach(t => t.stop()); this.stream = null; }
-    if (this.ctx && this.ctx.state === 'running') this.ctx.suspend().catch(() => {});
+    clearTimeout(this.dog);   // (the audio context stays running: suspending it raced with the next resume and left the detector deaf)
   },
+  checkAlive(stream) {   // armed but no audio reaching the detector: reopen the mic once
+    if (!this.on || this.stream !== stream || busy === 'listening') return;
+    if (this.alive && Date.now() - this.alive < 2500) return;
+    if (this.revived && Date.now() - this.revived < 20000) return;
+    this.revived = Date.now(); console.warn('[gibson] wake mic delivered no audio; reopening it');
+    this.closeMic(); this.openMic();
+  },
+  armed() { return !!(this.on && this.stream && this.ready && this.alive && Date.now() - this.alive < 2500); },
   // echo protection while Gibson's own voice plays: much stricter detector, and fully muted for lines that contain his name
   echo(on, text) { if (this.worker && this.ready) this.worker.postMessage({ type: 'echo', on: !!on, block: !!(on && /gib/i.test(text || '')) }); },
   useOnDevice() { return S.wakeEngine === 'ondevice' && !this.failed && !!(window.AudioWorkletNode && navigator.mediaDevices); },
