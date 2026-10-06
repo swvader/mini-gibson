@@ -54,13 +54,14 @@ body.convo[data-busy=listening] #convoGlow{opacity:1}
 <script>
 /* GitHub Pages can't send COOP/COEP headers, so sw.js adds them. The first visit reloads once when the worker takes over;
    then crossOriginIsolated is true and the voices can use multi-threaded WASM. */
-if ('serviceWorker' in navigator && location.protocol !== 'file:') {
+if ('serviceWorker' in navigator && location.protocol !== 'file:' && !window.GibsonNative) {   // (the Android app serves its own files)
   navigator.serviceWorker.register('sw.js').catch(() => {});
   navigator.serviceWorker.addEventListener('controllerchange', () => {
     if (!self.crossOriginIsolated && !sessionStorage.getItem('gibson.coiReload') && !window.GIBSON_STARTED) { sessionStorage.setItem('gibson.coiReload', '1'); location.reload(); }
   });
 }
 </script>
+<style>.native-only{display:none}html.native .native-only{display:block}</style>
 </head>
 <body>
 <canvas id="face"></canvas>
@@ -111,6 +112,10 @@ if ('serviceWorker' in navigator && location.protocol !== 'file:') {
     <label>Sensitivity <span id="sensV"></span><input type="range" id="wakeSens" min="0.1" max="0.9" step="0.05"></label>
     <div class="row"><small>Live score</small><div style="flex:1;height:8px;background:#140101;border:1px solid #3a0a06;border-radius:4px;overflow:hidden"><div id="wMeter" style="height:100%;width:0;background:#ff2a1a;transition:width .1s"></div></div></div>
     <small id="wakeNote"></small></div>
+   <div class="card native-only"><h3><span>Phone app</span></h3>
+    <label class="chk"><input type="checkbox" id="quietMic"> Quiet listening (mute the phone's mic beeps)</label>
+    <label class="chk"><input type="checkbox" id="faceTrack"> Face tracking (Gibson's eyes follow you; uses the front camera)</label>
+    <small>Ask “what do you see?” or “what am I holding?” and Gibson looks through the camera (needs a Gemini key).</small></div>
    <div class="card"><h3><span>Conversation mode</span></h3>
     <label class="chk"><input type="checkbox" id="convo"> Keep listening after each reply (no wake word needed between turns)</label>
     <label>End after silence <span id="ctoV"></span><input type="range" id="convoTimeout" min="10" max="60" step="5"></label>
@@ -135,6 +140,7 @@ if ('serviceWorker' in navigator && location.protocol !== 'file:') {
 </div>
 
 <script>window.GIBSON_APP = true;</script>
+<script src="native.js"></script>
 <script src="face.js"></script>
 <script src="app.js"></script>
 </body>

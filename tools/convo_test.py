@@ -15,7 +15,7 @@ class FakeSR { constructor() { this.continuous = false; this.interimResults = fa
   stop() { this._end(); } abort() { this._end(); } }
 window.SpeechRecognition = window.webkitSpeechRecognition = FakeSR;
 window.__bl = []; const __t0 = window.__t0 = Date.now(); setInterval(() => { const b = document.body && document.body.dataset.busy || '-'; if (window.__bl[window.__bl.length-1]?.[1] !== b) window.__bl.push([((Date.now()-__t0)/1000).toFixed(1), b]); }, 20);
-window.__phoneSpeak = 0; addEventListener('load', () => { const g = window.Gibson, sp = g.speak.bind(g); g.speak = (t, o) => { if (String(t).trim() && !(o && o.silent)) window.__phoneSpeak++, (window.__phoneTurns = window.__phoneTurns || new Set()).add((window.__bl || []).length); return sp(t, o); }; });
+window.__phoneSpeak = 0; addEventListener('load', () => { const g = window.Gibson, sp = g.speak.bind(g); g.speak = (t, o) => { if (String(t).trim() && !(o && o.silent)) (window.__pt = window.__pt || []).push([(window.__bl || []).length, String(t).slice(0, 40)]), window.__phoneSpeak++, (window.__phoneTurns = window.__phoneTurns || new Set()).add((window.__bl || []).length); return sp(t, o); }; });
 '''
 errs, logs = [], []
 def ok(c, msg): print(('PASS ' if c else 'FAIL ') + msg, flush=True)
@@ -93,8 +93,9 @@ with sync_playwright() as p:
     ok(not s['convo'] and s['busy'] is None, f'silence: conversation ended by itself after {time.time() - t2:.1f}s (timeout set to 10s)')
     print('   SR sessions:', pg.evaluate('window.__sr.log'))
     fb = len([l for l in logs if 'phone voice for this WHOLE reply' in l]); print('   neural timing:', [l[9:] for l in logs if 'neural:' in l])
-    pt = pg.evaluate('window.__phoneTurns ? window.__phoneTurns.size : 0')
-    ok(pt <= 1 + fb, f"no engine switching mid-reply (replies using the phone voice: {pt} = start greeting + {fb} whole-reply fallbacks allowed; {pg.evaluate('window.__phoneSpeak')} phone sentences)")
-    print('   phone-voice lines:', [l[:120] for l in logs if 'voice: phone' in l or 'WHOLE' in l])
+    pt = 1 + len({i for i, _ in json.loads(pg.evaluate('JSON.stringify(window.__pt || [])')) if i > 2})   # the start greeting counts once
+    ph = len([l for l in logs if 'voice: phone,' in l])   # greeting / replies while Kokoro was still loading
+    ok(pt <= ph + fb, f"no engine switching mid-reply (replies using the phone voice: {pt}; allowed {ph} phone-voice replies while Kokoro loaded + {fb} whole-reply fallbacks; {pg.evaluate('window.__phoneSpeak')} phone sentences)")
+    print('   phone texts:', pg.evaluate('JSON.stringify(window.__pt)')); print('   phone-voice lines:', [l[:120] for l in logs if 'voice: phone' in l or 'WHOLE' in l])
     b.close()
 print('ERRORS:', json.dumps(errs, indent=1))

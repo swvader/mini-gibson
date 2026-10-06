@@ -88,7 +88,7 @@ function thinkOpts(model) {
 const thinkOk = (() => { try { return JSON.parse(localStorage.getItem('gibson.gthink') || '{}'); } catch (e) { return {}; } })();
 async function gemini(msgs, onText, live) {
   const key = encodeURIComponent(S.keys.gemini.trim());
-  const contents = msgs.map(m => ({ role: m.role === 'assistant' ? 'model' : 'user', parts: [{ text: m.content }] }));
+  const contents = msgs.map(m => ({ role: m.role === 'assistant' ? 'model' : 'user', parts: m.image ? [{ inlineData: { mimeType: 'image/jpeg', data: m.image } }, { text: m.content }] : [{ text: m.content }] }));
   // try the chosen model, then well-known free-tier aliases if that model name is unknown or busy
   const tries = [...new Set([S.models.gemini === 'gemini-3.8-flash' ? '' : S.models.gemini, 'gemini-flash-latest', 'gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-flash-lite-latest'].filter(Boolean))];
   let lastErr = '';
@@ -131,7 +131,7 @@ async function callProvider(id, msgs, onText, live) {
   if (p.kind === 'demo') { const t = await demoBrain(msgs[msgs.length - 1].content); onText && onText(t); return t; }
   if (p.kind === 'gemini') return gemini(msgs, onText, live);
   const url = p.custom ? S.customUrl : p.url, key = S.keys[id], model = S.models[id] || DEFAULTS.models[id];
-  const body = { messages: [{ role: 'system', content: systemPrompt() }, ...msgs] };
+  const body = { messages: [{ role: 'system', content: systemPrompt() }, ...msgs.map(m => m.image ? { role: m.role, content: [{ type: 'text', text: m.content }, { type: 'image_url', image_url: { url: 'data:image/jpeg;base64,' + m.image } }] } : m)] };
   if (model) body.model = model;
   body[p.tokenParam || 'max_tokens'] = p.tokenParam ? 800 : 300;
   if (!p.custom && onText) body.stream = true;
@@ -177,16 +177,19 @@ async function weatherContext() {
   } catch (e) { return 'Live weather: the weather service did not answer right now.'; }
 }
 // Ask the brain chain; auto-fallback to the next provider on any failure (only if nothing was streamed yet).
+const VISION_RE = /\b(what (do|can) you see|can you see|look at (this|me|that)|what am i (holding|wearing|showing)|what('s| is) (this|that) (in my hand|i'?m holding)|what is this\b|what'?s this\b|how do i look|read (this|that)|what colou?r is|who is (this|that)|describe (this|what you see|me))/i;
 async function brain(userText, onText) {
   remember('user', userText);
   const errors = [];
   const wx = WX_RE.test(userText) ? await weatherContext() : null;
   const live = LIVE_RE.test(userText);
+  const img = window.GibsonSnap && VISION_RE.test(userText) ? await window.GibsonSnap() : null;   // Android app: look through the camera
   for (const id of chain()) {
     let got = '';
     try {
       const msgs = history.slice();
       if (wx && id !== 'demo') msgs[msgs.length - 1] = { role: 'user', content: `${userText}\n\n(${wx})` };
+      if (img && id !== 'demo') msgs[msgs.length - 1] = { role: 'user', content: msgs[msgs.length - 1].content + '\n\n(Attached: a photo from your camera eyes, taken just now. Describe or use what you see.)', image: img };
       const raw = await callProvider(id, msgs, t => { got += t; onText && onText(t); }, live);
       remember('assistant', raw);
       return { raw, provider: id, errors, live };
@@ -298,6 +301,7 @@ function genCount(d) { genBusy = Math.max(0, genBusy + d); if (G.setFpsCap) G.se
 const Neural = {
   name: 'Kokoro', w: null, state: 'off', msg: '', id: 0, epoch: 0, pend: new Map(), rtf: null, dev: null, cfg: '', gpuName: '',
   async pickDevice() {   // auto: WebGPU (fp16 if the GPU supports it, else fp32) on a real GPU; else CPU (WASM q8)
+    if (window.GibsonNativeTts) return { device: 'native', dtype: 'int8' };   // Android app: sherpa-onnx Kokoro on the phone's CPU
     const d = S.nDevice, cpu = { device: 'wasm', dtype: 'q8' };
     if (d === 'wasm' || !('gpu' in navigator) || this.noGpu) return cpu;
     let ad = null; try { ad = await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' }); } catch (e) {}
@@ -315,7 +319,7 @@ const Neural = {
     try {
       this.dev = await this.pickDevice(); this.cfg = this.dev.device + '-' + this.dev.dtype; this.rtf = getRtf(rtfKey('kokoro', this.cfg));
       this.state = 'loading'; this.msg = 'starting ' + this.cfg + '…'; showVoiceState();
-      try { this.w = new Worker('tts-worker.js', { type: 'module' }); }
+      try { this.w = window.GibsonNativeTts ? new window.GibsonNativeTts() : new Worker('tts-worker.js', { type: 'module' }); }
       catch (e) { this.state = 'error'; this.msg = e.message; showVoiceState(); return; }
       this.w.onmessage = e => this.onmsg(e.data);
       this.w.onerror = e => { e.preventDefault && e.preventDefault(); this.fail('worker error ' + (e.message || '')); };
