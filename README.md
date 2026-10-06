@@ -67,3 +67,11 @@ Head movement (ESP32) is off by default; see the `Head` object in app.js.
 - Key: Settings → Voice → "ElevenLabs API key", stored only in this phone's localStorage like the brain keys. Never in the repo or APK.
 - Fallback to the local Kokoro Gibson voice (never the phone voice) for no key, no internet, errors, a refused key / used-up characters (sticky until the key changes or the monthly reset), or first audio slower than 2.5 s. Remaining characters: GET /v1/user/subscription at most every 20 min; shown in Settings → Voice and "Last turn".
 - Fillers, coach words and sign-offs are rendered once per voice and kept in Cache Storage (`gibson-eleven-clips`), so they don't spend characters again.
+
+## App 1.0.8 notes
+
+- **Camera words:** he now hears many more ways of asking him to look ("take a look", "look", "what's this", "check this out", "snap a pic", "what am I holding", "tell me what this is", "look here"...). Speech-to-text slop is OK (no punctuation, "Hey Gibson" in front, "um", "please"). Reading words ("read this", "can you read this", "what does this say", "my prescription") go to label mode; everything else takes one photo. "Look up the weather" and "what's the stock price" do NOT turn the camera on. Test: `node tools/vision_test.mjs`.
+- **He can ask for a photo himself:** if you ask him to look and the phrase wasn't caught, the brain answers `[look]` (or `[read]`), the app takes the photo and asks again with it.
+- **Answer length:** normally 2 to 4 sentences. "Tell me more", "explain", "go into detail", "keep going", or asking for a story gives a long answer (several hundred words, spoken sentence by sentence). When a short answer leaves out something important he ends with "Want the full story?" and listens for your answer without the wake word; "yes / yeah / sure / go ahead" gets the long version.
+- **Voice picks the personality:** any Cereal voice turns on Cereal mode; Gibson (Kokoro), Callum, or Will go back to normal. The Personality menu still overrides.
+- **Label reading uses the front camera by default** (the case covers the back one). He coaches: "Hold it up in front of my eyes." The back-camera option is still in Settings, now off.

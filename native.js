@@ -9,6 +9,8 @@
   const saveOpt = () => localStorage.setItem('gibson.native', JSON.stringify(opt));
   // 1.0.6: the camera is off by default (continuous face tracking overheated the phone and slowed charging). Turn the old setting off once.
   if (opt.camV !== 2) { opt.faceTrack = false; opt.camV = 2; saveOpt(); }
+  // 1.0.8: label reading uses the front camera by default (Lenny's case covers the back camera). Turn the back-camera option off once.
+  if (opt.lbV !== 2) { opt.labelBack = false; opt.lbV = 2; saveOpt(); }
   // the camera only runs for vision / label questions and turns off again after 20 s without one
   const CAM_IDLE_MS = 20000;
   const camIdle = () => { clearTimeout(camOffT); if (!opt.faceTrack) camOffT = setTimeout(() => { if (!opt.faceTrack) N.camStop(); }, CAM_IDLE_MS); };

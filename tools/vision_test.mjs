@@ -1,0 +1,19 @@
+// node tools/vision_test.mjs : unit test of the camera trigger matcher in app.js (extracted between the <vision-match> markers)
+import fs from 'fs';
+const src = fs.readFileSync(new URL('../app.js', import.meta.url), 'utf8');
+const code = src.slice(src.indexOf('// <vision-match>'), src.indexOf('// </vision-match>'));
+const cameraIntent = new Function(code + '\nreturn cameraIntent;')();
+const cases = [
+  ['take a look', 'vision'], ['Hey Gibson, take a look.', 'vision'], ['look at this', 'vision'], ['look', 'vision'], ['Look!', 'vision'], ['hey gibson look', 'vision'],
+  ['what do you see', 'vision'], ['What do you see?', 'vision'], ['what is this', 'vision'], ["what's this", 'vision'], ['whats this', 'vision'], ['um what is this thing', 'vision'],
+  ['can you read this', 'label'], ['read this', 'label'], ['hey gibson can you read this for me', 'label'], ['read the label', 'label'], ['what does this say', 'label'], ['what does it say', 'label'],
+  ['take a picture', 'vision'], ['take a photo', 'vision'], ['take a pic', 'vision'], ['snap a pic', 'vision'], ['check this out', 'vision'], ['what am I holding', 'vision'],
+  ['see this', 'vision'], ['can you see', 'vision'], ['can you see me', 'vision'], ['tell me what this is', 'vision'], ['look here', 'vision'], ['okay gibson uh look at this', 'vision'],
+  ['what does the label say', 'label'], ['read my prescription', 'label'], ['what medicine is this', 'label'], ['hey Gibson. Check this out!', 'vision'], ['do you see this', 'vision'],
+  ['look up the weather', null], ["what's the stock price", null], ["what's the stock price of apple", null], ['what is the weather today', null], ['tell me a joke', null],
+  ['look for a pizza place nearby', null], ['see you later', null], ["what's this weekend's forecast", null], ['what is the capital of France', null], ['how are you', null],
+  ["let's see if it rains", null], ['I look forward to it', null], ['what time is it', null], ['what is that song about', null], ['explain how a fan works', null]
+];
+let fail = 0;
+for (const [t, want] of cases) { const got = cameraIntent(t); const ok = got === want; if (!ok) fail++; console.log(`${ok ? 'ok  ' : 'FAIL'} ${JSON.stringify(t).padEnd(44)} -> ${got} ${ok ? '' : '(want ' + want + ')'}`); }
+console.log(`\n${cases.length - fail}/${cases.length} passed`); process.exit(fail ? 1 : 0);

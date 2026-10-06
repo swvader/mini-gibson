@@ -2,7 +2,7 @@
 // GitHub Pages can't send headers, so every same-origin response gets COOP/COEP here (the coi-serviceworker idea, merged
 // into this one worker). COEP "credentialless" keeps CORS fetches to Hugging Face, Gemini and Open-Meteo working.
 // Only deletes its own old shell caches (gibson-vN); the voice and model caches are kept across updates.
-const VERSION = 'gibson-v26';
+const VERSION = 'gibson-v27';
 const SHELL = ['./', './index.html', './app.js', './face.js', './face.css', './manifest.webmanifest', './tts-worker.js', './native.js', './piper-worker.js', './piper-core.js',
   './wake/wake-worker.js', './wake/tap-worklet.js', './wake/hey_gibson.json', './wake/ort.wasm.min.js', './wake/ort.wasm.min.mjs',
   './icons/icon-192.png', './icons/icon-512.png', './icons/maskable-512.png', './icons/apple-touch-icon.png', './icons/favicon.png'];
