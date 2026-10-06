@@ -60,3 +60,10 @@ Head movement (ESP32) is off by default; see the `Head` object in app.js.
 - Never-lie rule in the system prompt for every brain.
 - Grok: live questions use xAI's Responses API with the web_search + x_search tools (streamed). If that fails: Gemini with Google Search, else Grok answers and says it can't look it up. Vision goes to Grok as an image_url data URL; a Grok model that can't take images sends the photo to Gemini. "Last turn" shows the brain, model and search used.
 - Voice samples (not in the app yet): voice-samples/gibson-cereal-drawl.mp3, -rasp.mp3, -burst.mp3. Laid-back hippie-hacker style, original script. Prosody tuned to numbers measured from a public reference clip (pitch, range, rate, pauses; the clip was deleted, nothing cloned). Tooling: /workspace/gibson-lab/cereal_ref.
+
+## Android app 1.0.7 / web v26: ElevenLabs voice
+- Default engine: ElevenLabs (eleven_flash_v2_5, `/v1/text-to-speech/{voice}/stream?output_format=pcm_24000`), one request per sentence (max 2 at a time), played through the same Web Audio path as Kokoro so the mouth follows the real audio. App: Java `elTts` does the request and hands back a local file URL; browser: direct fetch (ElevenLabs allows CORS).
+- Voices: Gibson Cereal C (default), A, B, Y1, Y2, Z1, Z2, plus stock Callum and Will (ids from voices/elevenlabs.json; C2/C3 deleted).
+- Key: Settings → Voice → "ElevenLabs API key", stored only in this phone's localStorage like the brain keys. Never in the repo or APK.
+- Fallback to the local Kokoro Gibson voice (never the phone voice) for no key, no internet, errors, a refused key / used-up characters (sticky until the key changes or the monthly reset), or first audio slower than 2.5 s. Remaining characters: GET /v1/user/subscription at most every 20 min; shown in Settings → Voice and "Last turn".
+- Fillers, coach words and sign-offs are rendered once per voice and kept in Cache Storage (`gibson-eleven-clips`), so they don't spend characters again.

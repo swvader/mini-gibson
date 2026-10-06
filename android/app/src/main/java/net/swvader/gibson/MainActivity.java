@@ -517,9 +517,35 @@ public class MainActivity extends ComponentActivity {
     });
   }
 
+  // ------------------------------------------------------------------ ElevenLabs TTS: POST, stream the PCM into a cache file, hand JS a local URL
+  void elTts(int id, String url, String key, String body) {
+    httpExec.execute(() -> {
+      java.net.HttpURLConnection c = null; long t0 = System.currentTimeMillis();
+      try {
+        c = (java.net.HttpURLConnection) new java.net.URL(url).openConnection();
+        c.setConnectTimeout(8000); c.setReadTimeout(12000); c.setRequestMethod("POST"); c.setDoOutput(true);
+        c.setRequestProperty("xi-api-key", key); c.setRequestProperty("Content-Type", "application/json"); c.setRequestProperty("Accept", "audio/pcm");
+        try (OutputStream o = c.getOutputStream()) { o.write(body.getBytes("UTF-8")); }
+        int st = c.getResponseCode();
+        if (st >= 400) {
+          String err = ""; InputStream es = c.getErrorStream();
+          if (es != null) { ByteArrayOutputStream bo = new ByteArrayOutputStream(); byte[] b = new byte[4096]; int n; while ((n = es.read(b)) > 0 && bo.size() < 2000) bo.write(b, 0, n); err = bo.toString("UTF-8"); }
+          emit("el", J("id", id, "status", st, "err", err.length() > 600 ? err.substring(0, 600) : err)); return;
+        }
+        File f = new File(new File(getCacheDir(), "tts"), "e" + (id % 60) + ".pcm"); long first = -1, total = 0;
+        try (InputStream in = c.getInputStream(); OutputStream out = new FileOutputStream(f)) {
+          byte[] b = new byte[16384]; int n;
+          while ((n = in.read(b)) > 0) { if (first < 0) first = System.currentTimeMillis() - t0; out.write(b, 0, n); total += n; }
+        }
+        emit("el", J("id", id, "status", st, "url", "https://" + HOST + "/tts/" + f.getName() + "?" + id, "first", first, "ms", System.currentTimeMillis() - t0, "bytes", total));
+      } catch (Throwable e) { emit("el", J("id", id, "error", String.valueOf(e))); }
+      finally { if (c != null) c.disconnect(); }
+    });
+  }
+
   // ------------------------------------------------------------------ JS bridge
   class Bridge {
-    @JavascriptInterface public String info() { return J("app", "1.0.6", "cores", Runtime.getRuntime().availableProcessors(), "model", "kokoro-int8-multi-lang-v1_0").toString(); }
+    @JavascriptInterface public String info() { return J("app", "1.0.7", "cores", Runtime.getRuntime().availableProcessors(), "model", "kokoro-int8-multi-lang-v1_0").toString(); }
     @JavascriptInterface public void ttsInit() { ttsExec.execute(MainActivity.this::ttsLoad); }
     @JavascriptInterface public void tts(int id, String text, int sid, float speed) { ttsExec.execute(() -> { if (tts == null) ttsLoad(); ttsGen(id, text, sid, speed); }); }
     @JavascriptInterface public void srStart(String lang, boolean continuous, boolean quiet) {
@@ -540,6 +566,7 @@ public class MainActivity extends ComponentActivity {
     @JavascriptInterface public String camInfo() { return J("on", camProvider != null, "frames", camFrames, "photoAge", lastJpeg == null ? -1 : System.currentTimeMillis() - lastJpegAt, "back", camBack, "hi", camHi, "face", faceOn, "err", camErr).toString(); }
     @JavascriptInterface public void say(int id, String text, float rate, float pitch) { main.post(() -> phoneSay(id, text, rate, pitch)); }
     @JavascriptInterface public void http(int id, String url, String method, String headers, String body) { MainActivity.this.http(id, url, method, headers, body); }
+    @JavascriptInterface public void elTts(int id, String url, String key, String body) { MainActivity.this.elTts(id, url, key, body); }
     @JavascriptInterface public void httpAbort(int id) { java.net.HttpURLConnection c = conns.remove(id); if (c != null) httpExec.execute(c::disconnect); }
     @JavascriptInterface public void labelStart(int id, boolean back, int maxMs) { main.post(() -> MainActivity.this.labelStart(id, back, maxMs)); }
     @JavascriptInterface public void labelStop(int id) { main.post(() -> { if (labelOn && labelId == id) labelFinish(); }); }

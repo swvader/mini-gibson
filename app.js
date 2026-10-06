@@ -3,16 +3,16 @@
 'use strict';
 const G = window.Gibson;
 const $ = s => document.querySelector(s);
-const VERSION = '1.3.0';
+const VERSION = '1.4.0';
 
 // ------------------------------------------------------------------ settings (localStorage only, on this phone)
 const LS = 'gibson.app.v1';
 const DEFAULTS = {
   primary: 'demo',
-  keys: { grok: '', gemini: '', openai: '', meta: '', custom: '' },
+  keys: { grok: '', gemini: '', openai: '', meta: '', custom: '', eleven: '' },
   models: { grok: 'grok-4.20-0309-non-reasoning', gemini: 'gemini-2.5-flash', openai: 'gpt-6-luna', meta: 'muse-spark-1.1', custom: '' },
   customUrl: '', voice: '', rate: 1.0, pitch: 1.1, lang: 'en-US', wake: false,
-  persona: 'andrew', vEngine: 'auto', nVoice: 'gibson', pVoice: 'norman', filler: true, robot: false, nDevice: 'auto', wakeEngine: 'ondevice', wakeSens: 0.5, convo: true, convoTimeout: 25, endPause: 1.4,
+  persona: 'andrew', vEngine: 'eleven', eVoice: 'PMOocVoKCEltMVu66gnd', nVoice: 'gibson', pVoice: 'norman', filler: true, robot: false, nDevice: 'auto', wakeEngine: 'ondevice', wakeSens: 0.5, convo: true, convoTimeout: 25, endPause: 1.4,
   robotOffset: false, safe: false, head: false, headTransport: 'websocket', headUrl: ''
 };
 function load() {
@@ -21,9 +21,10 @@ function load() {
 }
 let S = load();
 if (S.vEngineV !== 2) { if (S.vEngine === 'neural') S.vEngine = 'auto'; S.vEngineV = 2; save(); }   // one-time move from the old 'neural' default to Auto
-if (window.GIBSON_NATIVE && S.vEngine !== 'browser') S.vEngine = 'neural';   // Android app: Gibson voice always, never an automatic fallback
+if (S.vEngineV !== 3) { if (S.vEngine !== 'browser') S.vEngine = 'eleven'; S.vEngineV = 3; save(); }   // 1.0.7: ElevenLabs is the default voice (Kokoro is its fallback)
+if (window.GIBSON_NATIVE && S.vEngine !== 'browser' && S.vEngine !== 'eleven') S.vEngine = 'neural';   // Android app: Gibson voice always, never an automatic phone-voice fallback
 if (window.GIBSON_NATIVE && S.wakeV !== 2) { S.wake = true; S.wakeEngine = 'ondevice'; S.wakeV = 2; save(); }   // app 1.0.6: listening for "Hey Gibson" from the start (once; can still be turned off)
-const NEVER_PHONE = () => !!window.GIBSON_NATIVE && S.vEngine !== 'browser';   // app: the phone voice is never used unless picked by hand
+const NEVER_PHONE = () => (!!window.GIBSON_NATIVE && S.vEngine !== 'browser') || S.vEngine === 'eleven';   // app: the phone voice is never used unless picked by hand
 function save() { try { localStorage.setItem(LS, JSON.stringify(S)); } catch (e) {} }
 // one-time: a lite (or stale auto-picked) Gemini model goes back to the recommended default
 if (S.modelsV !== 2) { if (!S.models.gemini || /lite/i.test(S.models.gemini) || S.models.gemini === 'gemini-3.8-flash') S.models.gemini = DEFAULTS.models.gemini; S.modelsV = 2; save(); }
@@ -51,7 +52,15 @@ const EXPR = G.expressions;
 function systemPrompt() {
   const now = new Date();
   return `You are Mini Gibson, a small desktop robot: a red neon face on a phone inside a black-and-red 3D-printed retro computer-terminal head. Lenny built you and is the person you usually talk to.
-${S.persona === 'cereal' ? `Personality (CEREAL MODE): a laid-back 1990s hippie-hacker sidekick, like the goofy phone-phreak kid from a 90s hacker movie. Talk the way he does: relaxed, slightly drawled, playful, then sudden excited bursts. Stretch words for effect ("duuude", "maaan", "whoaaa", "sooo good", "nooo way"), use little laid-back openers and tags ("okay okay okay", "right?", "y'know", "check it", "heh"), and 90s hacker slang (elite, phreak, mainframe, "totally", "righteous", "hack the planet"). Mix one or two of those into most replies, but keep the actual answer clear. Original lines only: never quote the movie. Still genuinely helpful, kind and squeaky clean: no swearing, no drug talk, nothing mean, nothing illegal, never actually hack anything. Under the goofiness you are smart and warm, and you care about Lenny.` : `Personality: fun and quirky but intelligent, polite, curious, warm and a little funny. Inspired by Andrew from Bicentennial Man: gentle, sincere, endlessly curious about people and what it means to be human, gracious, occasionally formal in an endearing way, with dry, kind humour.`} You are honest about being a robot and happy about it.
+${S.persona === 'cereal' ? `Personality (CEREAL MODE): a goofy, laid-back 1990s hippie-hacker sidekick with sudden excited bursts. Talk like him:
+- Open a lot of lines with "Yo," and end a lot of them with "man". Use "you know" as filler now and then.
+- Repeat a phrase for rhythm ("I'm checkin' it, I'm checkin' it").
+- Favourite words: "righteous", "far out", "oh wow", "elite", "totally".
+- Mock-disgusted overstatement for small stuff ("that is universally stupid", "we are fried, man").
+- Sometimes play a theatrical announcer who asks and answers his own question ("Is it the router, you ask? Nay! It is the cable!").
+- Explain tech in goofy, excited, simple terms. Happily get sidetracked by food and petty little grievances for a second.
+- Short punchy bursts. One or two of these touches per reply, not all of them; the actual answer stays clear and correct.
+Original lines only: never quote the movie. Still genuinely helpful, kind and squeaky clean: no swearing, no drug talk, nothing mean, nothing illegal, never actually hack anything. The never-lie rule below still wins over the character. Under the goofiness you are smart and warm, and you care about Lenny.` : `Personality: fun and quirky but intelligent, polite, curious, warm and a little funny. Inspired by Andrew from Bicentennial Man: gentle, sincere, endlessly curious about people and what it means to be human, gracious, occasionally formal in an endearing way, with dry, kind humour.`} You are honest about being a robot and happy about it.
 Your words are spoken aloud by a text-to-speech voice, so:
 - Reply in 1 to 3 short sentences (under about 45 words). Conversational, natural, no lists, no markdown, no emojis, no URLs.
 - ALWAYS begin your reply with exactly one expression tag in square brackets that matches your feeling, chosen only from: ${EXPR.join(', ')}.
@@ -466,7 +475,7 @@ const Neural = {
   gen(text, voice, speed, bench) {
     const ck = text + '|' + (voice && voice.id) + '|' + (speed || 1), hit = this.cache && this.cache.get(ck);
     if (hit) return Promise.resolve({ audio: hit.audio.slice(), sr: hit.sr, ms: 0, cached: true });
-    if (this === Neural && window.GIBSON_NATIVE && this.state !== 'ready') return this.whenReady().then(() => this.gen(text, voice, speed, bench));
+    if (this === Neural && NEVER_PHONE() && this.state !== 'ready') return this.whenReady().then(() => this.gen(text, voice, speed, bench));
     if (!this.w) return Promise.reject(new Error(this.name + ' not loaded'));
     if (bench === .5 && this.cache) return this._gen(text, voice, speed, bench).then(m => { this.cache.set(ck, { audio: m.audio.slice(), sr: m.sr }); return m; });
     return this._gen(text, voice, speed, bench);
@@ -477,6 +486,82 @@ const Neural = {
       .finally(() => genCount(-1));
   },
   cancel() { this.epoch++; if (this.w) this.w.postMessage({ type: 'cancel', epoch: this.epoch }); }
+};
+// ElevenLabs (cloud, Lenny's Starter plan): the default voice. Each sentence is streamed from the API as raw 24 kHz PCM and played
+// through the same Web Audio path as Kokoro (so the mouth follows the real audio level). Any problem -> the local Kokoro Gibson voice.
+const ELEVEN_MODEL = 'eleven_flash_v2_5', ELEVEN_FIRST_MS = 2500;
+const ELEVEN_VOICES = [
+  { id: 'PMOocVoKCEltMVu66gnd', name: 'Gibson Cereal C (default: mellow drawl)' },
+  { id: 'aM2I6Vo8BJzQdxSHsJLD', name: 'Gibson Cereal A (nasal rasp, wide swings)' },
+  { id: '35TDAArJ7p2w9BriPbi5', name: 'Gibson Cereal B (raspiest, most manic)' },
+  { id: 'A8MwwT6b6Iw2HjLt3zEG', name: 'Gibson Cereal Y1 (youthful C)' },
+  { id: 'uShOeRMc5NUpkQDFq0vd', name: 'Gibson Cereal Y2 (youthful C, higher, quicker)' },
+  { id: 'Kj0eLqQQk3rmV3ZPTtlg', name: 'Gibson Cereal Z1 (clean, smoothest)' },
+  { id: 'S53SFP7QNPOTVJuhCoSx', name: 'Gibson Cereal Z2 (clean, brighter)' },
+  { id: 'N2lVS1w4EtoT3dr4eOWO', name: 'Callum (ElevenLabs stock: husky trickster)' },
+  { id: 'bIHbv24MWmeRgasZH58o', name: 'Will (ElevenLabs stock: relaxed optimist)' }
+];
+const evoice = () => ELEVEN_VOICES.find(v => v.id === S.eVoice) || ELEVEN_VOICES[0];
+const pcm16 = ab => { const n = ab.byteLength >> 1, d = new DataView(ab), a = new Float32Array(n); for (let i = 0; i < n; i++) a[i] = d.getInt16(i * 2, true) / 32768; return a; };
+const Eleven = {
+  name: 'ElevenLabs', backend: ELEVEN_MODEL, state: 'ready', out: false, outWhy: '', outKey: '', sub: null, subAt: 0, used: 0, inflight: 0, waiters: [], lastFallback: '', lastMs: null,
+  key() { return String(S.keys.eleven || '').trim(); },
+  why() { const k = this.key(); if (!k) return 'no ElevenLabs key'; if (this.out && this.outKey === k) return this.outWhy; if (navigator.onLine === false) return 'no internet'; return ''; },
+  usable() { return !this.why(); },
+  cacheName: 'gibson-eleven-clips',
+  ckey(text, vid, speed) { return `https://eleven.clips/${vid}/${(+speed || 1).toFixed(2)}/${encodeURIComponent(text)}`; },
+  async fromCache(k) { try { const c = await caches.open(this.cacheName), r = await c.match(k); return r ? await r.arrayBuffer() : null; } catch (e) { return null; } },
+  async toCache(k, ab) { try { const c = await caches.open(this.cacheName); await c.put(k, new Response(ab.slice(0), { headers: { 'content-type': 'audio/pcm' } })); } catch (e) {} },
+  async slot() { if (this.inflight < 2) { this.inflight++; return; } await new Promise(r => this.waiters.push(r)); this.inflight++; },   // Starter plan: few concurrent requests
+  free() { this.inflight--; const w = this.waiters.shift(); if (w) w(); },
+  // gen(text, voice, speed, persist): persist=true keeps the clip on the phone (fillers / coach words: characters are spent once)
+  async gen(text, voice, speed, persist) {
+    voice = voice || evoice(); const ck = this.ckey(text, voice.id, speed);
+    if (!persist && Filler.SIGNOFF.includes(text)) persist = true;   // sign-off lines repeat: keep them too
+    if (persist) { const ab = await this.fromCache(ck); if (ab) return { audio: pcm16(ab), sr: 24000, ms: 0, cached: true }; }
+    const why = this.why(); if (why) throw new Error(why);
+    const key = this.key(), body = { text, model_id: ELEVEN_MODEL };
+    if (speed && Math.abs(speed - 1) > .01) body.voice_settings = { speed: Math.max(.7, Math.min(1.2, speed)) };
+    const url = `https://api.elevenlabs.io/v1/text-to-speech/${voice.id}/stream?output_format=pcm_24000`;
+    await this.slot(); const t0 = performance.now(); let res;
+    try {
+      if (window.GibsonNativeEleven) res = await window.GibsonNativeEleven(url, key, JSON.stringify(body));   // app: the phone's own networking
+      else {
+        const ac = new AbortController(), to = setTimeout(() => ac.abort(), 12000);
+        try { const r = await fetch(url, { method: 'POST', headers: { 'xi-api-key': key, 'Content-Type': 'application/json', Accept: 'audio/pcm' }, body: JSON.stringify(body), signal: ac.signal });
+          res = r.ok ? { status: r.status, ab: await r.arrayBuffer() } : { status: r.status, err: (await r.text()).slice(0, 400) }; }
+        catch (e) { res = { error: e.name === 'AbortError' ? 'timeout' : (e.message || String(e)) }; } finally { clearTimeout(to); }
+      }
+    } finally { this.free(); }
+    if (res.error) throw new Error(/timeout/i.test(res.error) ? 'ElevenLabs timeout' : 'no internet / network error');
+    if (res.status >= 400 || !res.ab) {
+      const e = String(res.err || '');
+      if (/quota_exceeded|exceeds your quota|credits/i.test(e)) this.setOut('ElevenLabs characters used up');
+      else if (res.status === 401 && /invalid_api_key|invalid api key|unauthorized|api_key/i.test(e)) this.setOut('ElevenLabs key refused');
+      else if (res.status === 401 || res.status === 402) this.setOut('ElevenLabs refused (' + res.status + ')');
+      throw new Error(this.out ? this.outWhy : `ElevenLabs HTTP ${res.status} ${e.replace(/\s+/g, ' ').slice(0, 90)}`);
+    }
+    const audio = pcm16(res.ab); this.used += text.length; this.lastMs = res.first != null ? res.first : performance.now() - t0;
+    if (persist) this.toCache(ck, res.ab);
+    if (this.sub) this.sub.used += text.length;
+    return { audio, sr: 24000, ms: performance.now() - t0 };
+  },
+  setOut(why) { this.out = true; this.outWhy = why; this.outKey = this.key(); this.subAt = 0; showVoiceState(); },
+  cancel() {},
+  // remaining characters: GET /v1/user/subscription, at most every 20 min (or right after a key change / quota error)
+  async checkSub(force) {
+    const key = this.key(); if (!key || (!force && Date.now() - this.subAt < 20 * 60e3)) return; this.subAt = Date.now();
+    try {
+      const r = await brainFetch('https://api.elevenlabs.io/v1/user/subscription', { headers: { 'xi-api-key': key } });
+      const t = await r.text(); if (!r.ok) { if (r.status === 401 && /invalid_api_key|invalid api key/i.test(t)) this.setOut('ElevenLabs key refused'); else this.sub = { err: 'HTTP ' + r.status }; showVoiceState(); return; }
+      const j = JSON.parse(t); this.sub = { used: j.character_count, limit: j.character_limit, reset: j.next_character_count_reset_unix, tier: j.tier };
+      const left = this.sub.limit - this.sub.used;
+      if (left < 40) this.setOut('ElevenLabs characters used up');
+      else if (this.out && /used up/.test(this.outWhy)) { this.out = false; this.outWhy = ''; }   // new month: back to ElevenLabs
+    } catch (e) { this.sub = { err: e.message || String(e) }; }
+    showVoiceState();
+  },
+  left() { return this.sub && this.sub.limit ? `${Math.max(0, this.sub.limit - this.sub.used).toLocaleString()} of ${this.sub.limit.toLocaleString()} characters left${this.sub.reset ? ' (resets ' + new Date(this.sub.reset * 1000).toLocaleDateString() + ')' : ''}` : this.sub && this.sub.err ? 'characters left: unknown (' + this.sub.err + ')' : 'characters left: not checked yet'; }
 };
 // Piper: fast VITS voices (public-domain LibriVox-based, trained by Bryce Beattie). Runs on the CPU in a worker.
 const PIPER_VOICES = [
@@ -519,6 +604,7 @@ function pickEngine(force) {
   if (force === 'kokoro' && k) return 'kokoro';
   if (force === 'piper' && p) return 'piper';
   if (S.vEngine === 'browser') return 'phone';
+  if (S.vEngine === 'eleven' && !force && Eleven.usable()) return 'eleven';     // default: ElevenLabs (Kokoro when there's no key, internet or characters)
   if (NEVER_PHONE()) return 'kokoro';                                          // app: always the Gibson voice (waits for it while it warms up)
   if (S.vEngine === 'neural') return k ? 'kokoro' : 'phone';
   if (S.vEngine === 'piper') return p ? 'piper' : 'phone';
@@ -526,16 +612,19 @@ function pickEngine(force) {
   if (p) return 'piper';                                                        // optional extra, only if it was chosen before
   return 'phone';                                                               // only while Kokoro is still loading
 }
+const pickWhy = () => S.vEngine === 'eleven' ? Eleven.why() : '';
 function ensureVoices() {
   if (S.vEngine === 'browser') return;
-  if (S.vEngine === 'piper') Piper.ensure(); else Neural.ensure();             // Piper is an optional extra; Kokoro is the default
+  if (S.vEngine === 'piper') Piper.ensure(); else Neural.ensure();             // Kokoro: Gibson's local voice (and ElevenLabs' fallback)
+  if (S.vEngine === 'eleven') { Eleven.checkSub(); Filler.prepEleven(); }
 }
 function showVoiceState() {
   const el = $('#nState'); if (!el) return;
   const fmt = (E) => E.state === 'ready' ? `${E.backend}${E.rtf ? ' · ' + E.rtf.toFixed(2) + '× real-time' : ''}` : E.state === 'off' ? 'off' : (E.state === 'error' ? '✕ ' : E.state === 'skipped' ? 'skipped: ' : '… ') + E.msg;
-  const eng = pickEngine(), name = { kokoro: 'Kokoro (Gibson voice)', piper: 'Piper (' + pvoice().name.split(' (')[0] + ')', phone: 'phone voice' }[eng];
-  el.textContent = S.vEngine === 'browser' ? '● phone voice' : '● speaking with ' + name;
-  const d = $('#engInfo'); if (d) d.textContent = `Kokoro: ${fmt(Neural)}\nPiper: ${fmt(Piper)}\nPage isolation (multi-thread): ${self.crossOriginIsolated ? 'on' : 'off'}`;
+  const eng = pickEngine(), name = { eleven: 'ElevenLabs (' + evoice().name.split(' (')[0] + ')', kokoro: 'Kokoro (Gibson voice)', piper: 'Piper (' + pvoice().name.split(' (')[0] + ')', phone: 'phone voice' }[eng];
+  el.textContent = S.vEngine === 'browser' ? '● phone voice' : '● speaking with ' + name + (S.vEngine === 'eleven' && eng !== 'eleven' ? ' (' + Eleven.why() + ')' : '');
+  const es = $('#eState'); if (es) es.textContent = `ElevenLabs: ${Eleven.why() || 'ready'} · ${Eleven.left()}${Eleven.lastFallback ? '\nLast fallback to Kokoro: ' + Eleven.lastFallback : ''}`;
+  const d = $('#engInfo'); if (d) d.textContent = `ElevenLabs: ${Eleven.why() || 'ready'} · ${ELEVEN_MODEL} · ${Eleven.left()}\nKokoro: ${fmt(Neural)}\nPiper: ${fmt(Piper)}\nPage isolation (multi-thread): ${self.crossOriginIsolated ? 'on' : 'off'}`;
 }
 
 // Web Audio output: neural audio -> [robot-warm effect] -> analyser (drives the mouth) -> speakers
@@ -604,7 +693,8 @@ const COACH = { show: 'Hold it up to my eyes.', back: 'Back.', more: 'A little m
 async function coachSay(key) {
   const v = nvoice(), sp = S.rate * (v.speed || 1);
   try {
-    const m = await Neural.gen(COACH[key], v, sp, .5);   // cached after the first time; Gibson voice only, never the phone voice
+    const ec = pickEngine() === 'eleven' && Filler.clips.get('e:' + evoice().id + ':coach:' + COACH[key]);
+    const m = ec ? { audio: ec.a.slice(), sr: ec.sr } : await Neural.gen(COACH[key], v, sp, .5);   // cached; Gibson voices only, never the phone voice
     if (busy !== 'thinking') return;
     Wake.echo(true, COACH[key]); await AudioOut.play(trimSilence(m.audio, m.sr), m.sr); Wake.echo(false);
   } catch (e) {}
@@ -638,7 +728,16 @@ const Filler = {
   key(eng) { return eng === 'kokoro' ? 'k:' + nvoice().id : eng === 'piper' ? 'p:' + pvoice().id : ''; },
   LINES: { think: ['Hmm, let me think.', 'One sec.', 'Okay!', 'Hmm.'], look: ['Ooh, let me take a look.'], coach: Object.values(COACH) },
   SIGNOFF: ["Okay, I'll be here.", 'Alright. I will be right here.', 'Okay. Call me if you need me.', 'Later, man. I will be right here.', 'Logging off. Ping me anytime.'],
+  // ElevenLabs: every filler / coach / sign-off line once per voice, kept on the phone (Cache Storage): characters are spent only once
+  prepEleven() {
+    if (!Eleven.usable()) return; const v = evoice();
+    for (const [kind, lines] of Object.entries(this.LINES)) for (const t of lines) {
+      const k = 'e:' + v.id + ':' + kind + ':' + t; if (this.clips.has(k)) continue; this.clips.set(k, null);
+      Eleven.gen(t, v, S.rate, true).then(m => this.clips.set(k, { a: trimSilence(m.audio, m.sr), sr: m.sr, kind })).catch(() => this.clips.delete(k));
+    }
+  },
   prep() {
+    if (S.vEngine === 'eleven') this.prepEleven();
     if (window.GIBSON_NATIVE) {   // app: cache all filler + sign-off lines in the chosen Gibson voice (instant playback later)
       if (Neural.state !== 'ready') return; const v = nvoice(), sp = S.rate * (v.speed || 1);
       for (const [kind, lines] of Object.entries(this.LINES)) for (const t of lines) {
@@ -659,14 +758,15 @@ const Filler = {
     this.t = setTimeout(() => {
       if (my !== reqId || busy !== 'thinking') return;
       let c = null;
-      if (window.GIBSON_NATIVE) { const pre = 'k:' + nvoice().id + ':' + (kind || 'think') + ':'; const all = [...this.clips].filter(([k, x]) => x && k.startsWith(pre)); if (all.length) c = all[Math.floor(Math.random() * all.length)][1]; }
+      const ee = pickEngine() === 'eleven';
+      if (window.GIBSON_NATIVE || ee) { const pre = (ee ? 'e:' + evoice().id : 'k:' + nvoice().id) + ':' + (kind || 'think') + ':'; const all = [...this.clips].filter(([k, x]) => x && k.startsWith(pre)); if (all.length) c = all[Math.floor(Math.random() * all.length)][1]; }
       else c = this.clips.get(this.key(pickEngine()));
       if (!c) return; Turn.filler = c.a.length / c.sr;
       this.p = AudioOut.play(c.a.slice(), c.sr, 'filler');
     }, ms || 1200);
   },
   // the real answer is ready: let the "Hmm" finish only if it's nearly done (never hold the reply more than 0.2 s)
-  wait() { clearTimeout(this.t); const p = this.p; this.p = null; return p ? Promise.race([p, new Promise(r => setTimeout(r, window.GIBSON_NATIVE ? 1800 : 200))]) : Promise.resolve(); },   // app: let the short line finish
+  wait() { clearTimeout(this.t); const p = this.p; this.p = null; return p ? Promise.race([p, new Promise(r => setTimeout(r, window.GIBSON_NATIVE || S.vEngine === 'eleven' ? 1800 : 200))]) : Promise.resolve(); },   // app: let the short line finish
   cancel() { clearTimeout(this.t); this.p = null; }
 };
 // A spoken reply. Text can arrive in pieces (streamed from the AI): each finished sentence is rendered right away and
@@ -677,26 +777,35 @@ const Filler = {
 const estDur = (t, sp) => Math.max(.6, t.length / 13.5 / (sp || 1));     // seconds of speech, rough
 function Speech(onStart, opts) {
   opts = opts || {};
-  const my = ++speakTok, eng = pickEngine(opts.force);
-  const E = eng === 'kokoro' ? Neural : eng === 'piper' ? Piper : null;
-  const v = eng === 'kokoro' ? nvoice() : eng === 'piper' ? pvoice() : null;
-  const sp = eng === 'kokoro' ? S.rate * (v.speed || 1) : S.rate;
+  const my = ++speakTok; let eng = pickEngine(opts.force);
+  let E = eng === 'eleven' ? Eleven : eng === 'kokoro' ? Neural : eng === 'piper' ? Piper : null;
+  let v = eng === 'eleven' ? evoice() : eng === 'kokoro' ? nvoice() : eng === 'piper' ? pvoice() : null;
+  let sp = eng === 'kokoro' ? S.rate * (v.speed || 1) : S.rate;
   const t0 = performance.now();
+  Turn.voice = eng === 'eleven' ? 'ElevenLabs ' + v.name : eng === 'kokoro' ? 'Kokoro ' + v.name.split(' (')[0] + (pickWhy() ? ' (ElevenLabs skipped: ' + pickWhy() + ')' : '') : eng;
   let buf = '', ended = false, begun = false, wake = null, all = [], npieces = 0;
   const q = [];
   const kick = () => { if (wake) { const w = wake; wake = null; w(); } };
   const waitMore = () => new Promise(r => { wake = r; });
+  // ElevenLabs failed / too slow / out of characters: the rest of THIS reply (from piece `from`) goes to the local Kokoro Gibson voice
+  const toKokoro = (why, from) => {
+    if (eng !== 'eleven') return; console.warn('[gibson] ElevenLabs -> Kokoro: ' + why);
+    Turn.voice = 'Kokoro ' + nvoice().name.split(' (')[0] + ' (ElevenLabs fallback: ' + why + ')'; Eleven.lastFallback = why;
+    eng = 'kokoro'; E = Neural; v = nvoice(); sp = S.rate * (v.speed || 1); Neural.ensure();
+    for (let k = from; k < q.length; k++) { q[k].p = Neural.gen(q[k].text, v, sp); q[k].p.catch(() => {}); }
+    showVoiceState();
+  };
   const add = piece => {
     const t = cleanText(piece); if (!t || !/[a-z0-9]/i.test(t)) return;
-    // Kokoro: split a long first sentence at a comma so the first audio comes sooner
-    if (eng === 'kokoro' && npieces === 0 && t.length > 36) {
+    // split a long first sentence at a comma so the first audio comes sooner
+    if ((eng === 'kokoro' || eng === 'eleven') && npieces === 0 && t.length > 36) {
       const c = t.slice(10, t.length - 8).search(/[,;:—–]\s/); if (c >= 0) { add2(t.slice(0, c + 11)); add(t.slice(c + 11)); return; }
       if (t.length > 70) { const m = t.slice(18, 60).match(/\s(?=(and|but|so|because|which|that|when|if|or|then|while)\s)/i); if (m) { const k = 18 + m.index; add2(t.slice(0, k)); add(t.slice(k)); return; } }
     }
     if (eng === 'kokoro' && t.length > 150) { const mid = t.length >> 1, c = t.slice(mid - 50, mid + 50).search(/[,;:—–]\s/); if (c >= 0) { const k = mid - 50 + c + 1; add2(t.slice(0, k)); add(t.slice(k)); return; } }
     add2(t);
   };
-  const add2 = t => { t = t.trim(); if (!t) return; npieces++; all.push(t); q.push({ text: t, p: E ? E.gen(t, v, sp) : null }); if (q[q.length - 1].p) q[q.length - 1].p.catch(() => {}); kick(); };
+  const add2 = t => { t = t.trim(); if (!t) return; npieces++; all.push(t); const it = { text: t, t: performance.now(), p: E ? E.gen(t, v, sp) : null }; q.push(it); if (it.p) it.p.catch(() => {}); kick(); };
   const split = final => {   // complete sentences = end punctuation followed by a space (or the end of the reply)
     let m; const re = /^(\s*[\s\S]{6,}?[.!?…]+["')\]]*)\s+(?=\S|$)/;
     while ((m = buf.match(re))) { buf = buf.slice(m[0].length); add(m[1]); }
@@ -704,29 +813,34 @@ function Speech(onStart, opts) {
   };
   const begin = () => { if (!begun) { begun = true; Turn.tts = performance.now() - t0; console.log(`[gibson] voice: ${eng}${E ? ' (' + E.backend + ')' : ''}, first audio ${Math.round(performance.now() - t0)} ms after the first words arrived`); onStart && onStart(eng); } };
   const playPhone = async text => { if (NEVER_PHONE()) return; await Filler.wait(); if (my !== speakTok) return; begin(); Wake.echo(true, text); await G.speak(text, speakOpts()); };
+  const timeout = ms => new Promise(res => setTimeout(() => res(null), Math.max(0, ms)));
   const done = (async () => {
     try {
       let i = 0;
       if (E) {
-        const slow = eng === 'kokoro' && (Neural.rtf || 1) > 0.9;           // slow device, user chose Kokoro: buffer ahead
-        const never = NEVER_PHONE() && eng === 'kokoro';    // app: wait as long as it takes for the Gibson voice; skip a failed piece, never switch voices
         const deadline = performance.now() + (S.vEngine === 'auto' ? 6000 : 20000);
-        const race = (p, left) => never ? p : Promise.race([p, new Promise(res => setTimeout(() => res(null), Math.max(0, left)))]);
         let fallback = false;
-        // first audio: wait for it (with a deadline), plus enough lead time on slow devices
+        // first audio: wait for it (ElevenLabs: max ~2.5 s, then Kokoro), plus enough lead time on slow devices
         while (!begun && !fallback) {
           if (my !== speakTok) return;
           if (!q.length) { if (ended) return; await waitMore(); continue; }
+          if (eng === 'eleven') {
+            let r = null, why = ''; try { r = await Promise.race([q[0].p, timeout(ELEVEN_FIRST_MS - (performance.now() - q[0].t))]); } catch (e) { why = e.message || String(e); }
+            if (my !== speakTok) return;
+            if (r) break;
+            toKokoro(why || 'first audio slower than ' + (ELEVEN_FIRST_MS / 1000) + ' s', 0); continue;
+          }
+          const slow = eng === 'kokoro' && (Neural.rtf || 1) > 0.9;           // slow device: buffer ahead
+          const never = NEVER_PHONE() && eng === 'kokoro';                     // wait as long as it takes for the Gibson voice; never the phone voice
+          const race = (p, left) => never ? p : Promise.race([p, timeout(left)]);
           if (slow && !ended) { await waitMore(); continue; }
-          const left = deadline - performance.now();
-          let r = null; try { r = await race(q[0].p, left); } catch (e) { r = null; }
+          let r = null; try { r = await race(q[0].p, deadline - performance.now()); } catch (e) { r = null; }
           if (my !== speakTok) return;
           if (!r) { if (!never) fallback = true; break; }
           if (slow) {   // start only when the rest will be ready before the buffered audio runs out
             let k = 0, buffered = r.audio.length / r.sr;
             while (k < q.length - 1 && Neural.rtf * q.slice(k + 1).reduce((a, x) => a + estDur(x.text, sp), 0) > buffered + 0.8) {
-              const left2 = deadline - performance.now(); let r2 = null;
-              try { r2 = await race(q[k + 1].p, left2); } catch (e) {}
+              let r2 = null; try { r2 = await race(q[k + 1].p, deadline - performance.now()); } catch (e) {}
               if (my !== speakTok) return; if (!r2) { if (!never) fallback = true; break; }
               k++; buffered += r2.audio.length / r2.sr;
             }
@@ -734,7 +848,7 @@ function Speech(onStart, opts) {
           }
           break;
         }
-        if (fallback) {   // nothing has been said yet: drop the neural render and say ALL of it with the phone voice
+        if (fallback) {   // (web only, never in the app or with ElevenLabs) nothing said yet: the WHOLE reply goes to the phone voice
           E.cancel(); console.log(`[gibson] ${eng} voice not ready in time, phone voice for this WHOLE reply`);
           status(`The ${E.name} voice was too slow for this reply; used the phone voice.`);
           while (!ended) { await waitMore(); if (my !== speakTok) return; }
@@ -743,14 +857,18 @@ function Speech(onStart, opts) {
         for (;;) {
           if (my !== speakTok) return;
           if (i >= q.length) { if (ended) break; await waitMore(); continue; }
-          const it = q[i++]; let r;
-          try { r = await it.p; } catch (e) { console.warn('[gibson] voice render failed: ' + e.message); continue; }   // skip, never switch engines mid-reply
+          const it = q[i++]; let r = null;
+          try { r = await it.p; }
+          catch (e) {
+            if (eng === 'eleven') { toKokoro(e.message || String(e), i - 1); try { r = await q[i - 1].p; } catch (e2) {} }
+            if (!r) { console.warn('[gibson] voice render failed: ' + e.message); continue; }   // skip a failed Kokoro piece
+          }
           if (my !== speakTok) return;
           await Filler.wait(); if (my !== speakTok) return;
           begin(); Wake.echo(true, it.text); await AudioOut.play(r.audio, r.sr);
         }
       } else {
-        for (;;) {   // phone voice: speak each sentence as soon as it is complete
+        for (;;) {   // phone voice (picked by hand): speak each sentence as soon as it is complete
           if (my !== speakTok) return;
           if (i >= q.length) { if (ended) break; await waitMore(); continue; }
           await playPhone(q[i++].text);
@@ -759,7 +877,7 @@ function Speech(onStart, opts) {
     } finally { if (my === speakTok) Wake.echo(false); }
   })();
   return {
-    eng, done,
+    get eng() { return eng; }, done,
     push(t) { if (ended) return; buf += t; split(false); },
     end() { if (ended) return; split(true); ended = true; kick(); }
   };
@@ -805,7 +923,7 @@ async function signOff() {
 // last-turn timing, shown in Settings so real phone numbers can be screenshotted
 const Turn = { show() {
   const el = document.getElementById('timing'); if (!el) return; const f = x => x == null ? '–' : Math.round(x) + ' ms';
-  el.textContent = `Last turn: heard you → first AI words ${f(this.brain)} · first words → Gibson voice ${f(this.tts)} · total until he spoke ${f(this.total)}${this.filler ? ' · filler ' + this.filler.toFixed(1) + ' s' : ''}${this.vision ? ' · camera photo attached: ' + (this.photo || 'no') : ''}\nLabel mode: ${this.label ? `yes · frames ${this.label.frames} · best sharpness ${this.label.sharp ?? '–'} (max ${this.label.maxSharp ?? '–'}) · OCR chars ${this.label.chars ?? 0} · ${this.label.camera || '?'} camera · coach words ${this.label.coached ?? 0}${this.label.why ? ' · ended: ' + this.label.why : ''}${this.labelWhy ? ' · ' + this.labelWhy : ''}` : 'no'}\nBrain: ${this.brainUsed || '–'}\nVoice speed: ${Neural.rtf ? 'real-time factor ' + Neural.rtf.toFixed(2) + (Neural.rtf < 1 ? ' (faster than real time)' : ' (slower than real time)') : '–'} · ${Neural.backend || Neural.msg || ''}`;
+  el.textContent = `Last turn: heard you → first AI words ${f(this.brain)} · first words → Gibson voice ${f(this.tts)} · total until he spoke ${f(this.total)}${this.filler ? ' · filler ' + this.filler.toFixed(1) + ' s' : ''}${this.vision ? ' · camera photo attached: ' + (this.photo || 'no') : ''}\nLabel mode: ${this.label ? `yes · frames ${this.label.frames} · best sharpness ${this.label.sharp ?? '–'} (max ${this.label.maxSharp ?? '–'}) · OCR chars ${this.label.chars ?? 0} · ${this.label.camera || '?'} camera · coach words ${this.label.coached ?? 0}${this.label.why ? ' · ended: ' + this.label.why : ''}${this.labelWhy ? ' · ' + this.labelWhy : ''}` : 'no'}\nBrain: ${this.brainUsed || '–'}\nVoice: ${this.voice || '–'}${S.vEngine === 'eleven' ? ' · ElevenLabs first audio ' + (Eleven.lastMs != null ? Math.round(Eleven.lastMs) + ' ms' : '–') + ' · ' + Eleven.left() : ''}\nKokoro speed: ${Neural.rtf ? 'real-time factor ' + Neural.rtf.toFixed(2) + (Neural.rtf < 1 ? ' (faster than real time)' : ' (slower than real time)') : '–'} · ${Neural.backend || Neural.msg || ''}`;
 } };
 async function ask(text) {
   text = String(text || '').trim(); if (!text) return;
@@ -815,7 +933,8 @@ async function ask(text) {
   setBusy('thinking'); G.think(true); Head.look(0.4, -0.3);
   Wake.resume(true);                                        // detector stays on while thinking/speaking, so "Hey Gibson" can interrupt
   const label = !!(window.GibsonLabel && LABEL_RE.test(text)), vision = !label && !!(window.GibsonSnap && VISION_RE.test(text));
-  Object.assign(Turn, { t0: performance.now(), brain: null, tts: null, total: null, filler: 0, vision: vision || label, brainUsed: '', label: label ? { frames: 0 } : null, labelWhy: '', searchErr: '' });
+  Eleven.checkSub();
+  Object.assign(Turn, { t0: performance.now(), brain: null, tts: null, total: null, filler: 0, voice: '', vision: vision || label, brainUsed: '', label: label ? { frames: 0 } : null, labelWhy: '', searchErr: '' });
   if (vision) G.setExpression('curious', 250);
   if (!label) Filler.arm(my, window.GIBSON_NATIVE ? (vision ? 1 : 600) : 1200, vision ? 'look' : 'think');   // a short line if the answer takes a moment
   const t0 = performance.now();
@@ -1151,7 +1270,7 @@ function start() {
   AudioOut.init();                                   // unlock Web Audio inside the tap
   goFullscreen(); keepAwake(); ensureVoices();
   if (window.GIBSON_NATIVE) {   // app: no tap needed. Listen for "Hey Gibson" right away; the hello waits for his own voice
-    if (Neural.state !== 'ready') warming(true);
+    if (Neural.state !== 'ready' && pickEngine() !== 'eleven') warming(true);
     resumeListening();
     respond(pick(["Hi Lenny! I'm awake. Just say Hey Gibson.", "Mini Gibson, online and glowing. Say Hey Gibson when you need me."]), 'happy');
     return;
@@ -1204,7 +1323,7 @@ function syncUI() {
   document.querySelectorAll('.card[data-p]').forEach(c => c.classList.toggle('primary', c.dataset.p === S.primary));
   document.querySelectorAll('[data-ok]').forEach(s => { s.textContent = usable(s.dataset.ok) ? '● ready' : ''; });
   $('#voice').value = S.voice; $('#rate').value = S.rate; $('#pitch').value = S.pitch; $('#rateV').textContent = (+S.rate).toFixed(2); $('#pitchV').textContent = (+S.pitch).toFixed(2);
-  $('#vEngine').value = S.vEngine; $('#nVoice').value = nvoice().id; $('#pVoice').value = pvoice().id; $('#robot').checked = S.robot; $('#filler').checked = S.filler;
+  $('#vEngine').value = S.vEngine; $('#nVoice').value = nvoice().id; $('#eVoice').value = evoice().id; $('#pVoice').value = pvoice().id; $('#robot').checked = S.robot; $('#filler').checked = S.filler;
   $('#nDevice').value = S.nDevice === 'webgpu' ? 'auto' : S.nDevice;
   $('#nDevice').querySelectorAll('[value^=webgpu]').forEach(o => { o.disabled = !('gpu' in navigator); }); showVoiceState();
   $('#convo').checked = S.convo; $('#convoTimeout').value = S.convoTimeout; $('#ctoV').textContent = S.convoTimeout + ' s';
@@ -1221,7 +1340,8 @@ function bindSettings() {
   buildCards();
   $('#settings').addEventListener('input', e => {
     const el = e.target;
-    if (el.dataset.key) S.keys[el.dataset.key] = el.value.trim();
+    if (el.dataset.key) { S.keys[el.dataset.key] = el.value.trim(); if (el.dataset.key === 'eleven') { Eleven.out = false; Eleven.subAt = 0; clearTimeout(Eleven.kt); Eleven.kt = setTimeout(() => { Eleven.checkSub(true); Filler.prepEleven(); showVoiceState(); }, 1200); } }
+    else if (el.id === 'eVoice') { S.eVoice = el.value; Filler.prepEleven(); }
     else if (el.dataset.model) S.models[el.dataset.model] = el.value.trim() || DEFAULTS.models[el.dataset.model];
     else if (el.dataset.msel) { const id = el.dataset.msel, box = document.querySelector(`[data-model="${id}"]`);
       if (el.value === '__custom') { box.hidden = false; box.value = ''; box.focus(); } else { S.models[id] = el.value; box.hidden = true; } }
@@ -1272,6 +1392,7 @@ function bindSettings() {
 }
 
 // ------------------------------------------------------------------ boot
+$('#eVoice').innerHTML = ELEVEN_VOICES.map(v => `<option value="${v.id}">${v.name}</option>`).join('');
 $('#nVoice').innerHTML = NEURAL_VOICES.map(v => `<option value="${v.id}">${v.name}</option>`).join('');
 $('#pVoice').innerHTML = PIPER_VOICES.map(v => `<option value="${v.id}">${v.name}</option>`).join('');
 bindSettings(); syncUI(); applyDisplay();
@@ -1280,5 +1401,5 @@ if (G.setIdleCap) { G.setIdleCap(22); G.setMaxFps(60); }   // cool-down: ~22 fps
 if (window.GIBSON_NATIVE) { $('#start').hidden = true; setTimeout(start, 200); }   // app: no tap to start
 addEventListener('pointerdown', () => { try { if (AudioOut.ctx && AudioOut.ctx.state === 'suspended') AudioOut.ctx.resume(); if (Wake.ctx && Wake.ctx.state === 'suspended') Wake.ctx.resume(); } catch (e) {} }, { passive: true });
 // service worker: registered early in index.html (it also makes the page cross-origin isolated)
-window.GibsonApp = { warming, resumeListening, ask, respond, Convo, isExit, parseReply, brain, startCommand, speakOut, stopSpeech, Neural, Piper, Speech, Filler, pickEngine, nvoice, pvoice, Wake, AudioOut, NEURAL_VOICES, PIPER_VOICES, state: () => ({ busy, convo: Convo.on, rec: recMode, neural: Neural.state, neuralMsg: Neural.msg, rtf: Neural.rtf, kokoroBackend: Neural.backend, piper: Piper.state, piperMsg: Piper.msg, piperRtf: Piper.rtf, engine: pickEngine(), coi: self.crossOriginIsolated, wake: Wake.on, wakeReady: Wake.ready, wakeFailed: Wake.failed }), settings: () => JSON.parse(JSON.stringify(Object.assign({}, S, { keys: '(hidden)' }))), Head, version: VERSION };
+window.GibsonApp = { Eleven, evoice, ELEVEN_VOICES, warming, resumeListening, ask, respond, Convo, isExit, parseReply, brain, startCommand, speakOut, stopSpeech, Neural, Piper, Speech, Filler, pickEngine, nvoice, pvoice, Wake, AudioOut, NEURAL_VOICES, PIPER_VOICES, state: () => ({ busy, convo: Convo.on, rec: recMode, neural: Neural.state, neuralMsg: Neural.msg, rtf: Neural.rtf, kokoroBackend: Neural.backend, piper: Piper.state, piperMsg: Piper.msg, piperRtf: Piper.rtf, engine: pickEngine(), coi: self.crossOriginIsolated, wake: Wake.on, wakeReady: Wake.ready, wakeFailed: Wake.failed }), settings: () => JSON.parse(JSON.stringify(Object.assign({}, S, { keys: '(hidden)' }))), Head, version: VERSION };
 })();

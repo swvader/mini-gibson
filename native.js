@@ -23,6 +23,7 @@
     } else if (type === 'snap') { const f = snaps.get(d.id); if (f) { snaps.delete(d.id); f(d.b64 || null); } }
     else if (type === 'http') { const f = https.get(d.id); if (f) f(d); }
     else if (type === 'say') window.__nativeSayDone(d);
+    else if (type === 'el') { const f = els.get(d.id); if (f) { els.delete(d.id); f(d); } }
     else if (type === 'label') { const L = labels.get(d.id); if (L && L.onHint) L.onHint(d); }
     else if (type === 'labeldone') { const L = labels.get(d.id); if (L) { labels.delete(d.id); L.res(d); } }
     else if (type === 'cam') { if (d.error) { console.warn('[gibson] camera: ' + d.error); camErr = d.error; } }
@@ -108,6 +109,18 @@
     N.http(id, url, opts.method || 'GET', JSON.stringify(opts.headers || {}), opts.body || '');
   });
 
+  // ElevenLabs through the app's own networking: the PCM lands in a cache file, served back on the app's /tts/ path
+  const els = new Map(); let elId = 0;
+  window.GibsonNativeEleven = N.elTts ? (url, key, body) => new Promise(res => {
+    const id = ++elId; let t = setTimeout(() => { if (els.has(id)) { els.delete(id); res({ error: 'timeout' }); } }, 15000);
+    els.set(id, async d => {
+      clearTimeout(t);
+      if (d.error) return res({ error: d.error });
+      if (d.status >= 400 || !d.url) return res({ status: d.status, err: d.err || '' });
+      try { res({ status: d.status, ab: await (await fetch(d.url)).arrayBuffer(), first: d.first }); } catch (e) { res({ error: String(e.message || e) }); }
+    });
+    N.elTts(id, url, key, body);
+  }) : null;
   const says = new Map(); let sayId = 0;
   function wavToFloat(buf) {
     const v = new DataView(buf); let sr = 22050, off = 12, data = null;
@@ -151,8 +164,8 @@
   addEventListener('DOMContentLoaded', () => {
     hookSpeak();
     const ve = document.getElementById('vEngine');   // app: Gibson voice always; the phone voice only as a hand-picked last resort
-    if (ve) ve.innerHTML = '<option value="neural">Gibson voice always (wait for it)</option><option value="browser">Phone voice (last resort: robotic, not recommended)</option>';
-    if (ve) try { ve.value = window.GibsonApp && GibsonApp.settings().vEngine === 'browser' ? 'browser' : 'neural'; } catch (e) {}
+    if (ve) ve.innerHTML = '<option value="eleven">ElevenLabs (default; Kokoro Gibson voice if no key, internet or characters)</option><option value="neural">Kokoro Gibson voice always (on the phone, free)</option><option value="browser">Phone voice (last resort: robotic, not recommended)</option>';
+    if (ve) try { const e = window.GibsonApp && GibsonApp.settings().vEngine; ve.value = e === 'browser' || e === 'eleven' ? e : 'neural'; } catch (e) {}
     for (const [id, k] of [['faceTrack', 'faceTrack'], ['quietMic', 'quietMic'], ['labelBack', 'labelBack']]) {
       const el = document.getElementById(id); if (!el) continue; el.checked = !!opt[k];
       el.addEventListener('change', () => { opt[k] = el.checked; saveOpt(); if (k === 'faceTrack') { clearTimeout(camOffT); if (el.checked) N.camStart(); else { N.camStop(); window.Gibson && Gibson.lookAt(null); } } });
