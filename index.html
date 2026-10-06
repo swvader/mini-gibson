@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<meta name="theme-color" content="#000000">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Gibson">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icons/favicon.png">
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+<title>Mini Gibson</title>
+<link rel="stylesheet" href="face.css">
+<style>
+:root{--red:#ff2a1a;--dim:#a51a10;--txt:#ffc9c2}
+.ui{position:fixed;z-index:20;-webkit-user-select:none;user-select:none}
+#start{inset:0;display:flex;align-items:flex-end;justify-content:center;padding-bottom:7vh;background:rgba(0,0,0,.35);cursor:pointer}
+#start span{font:600 clamp(12px,2.6vh,20px)/1 ui-monospace,Menlo,Consolas,monospace;letter-spacing:.3em;color:#ff6a5a;text-shadow:0 0 8px #ff2010;animation:pulse 2s ease-in-out infinite;text-transform:uppercase}
+@keyframes pulse{50%{opacity:.35}}
+.iconbtn{width:44px;height:44px;border-radius:50%;border:1px solid rgba(255,42,26,.35);background:rgba(30,0,0,.25);display:flex;align-items:center;justify-content:center;opacity:.16;transition:opacity .4s;cursor:pointer;padding:0}
+.iconbtn svg{width:22px;height:22px;fill:none;stroke:#ff5040;stroke-width:2}
+body.awake .iconbtn{opacity:.75}
+#gear{top:max(10px,env(safe-area-inset-top));right:max(12px,env(safe-area-inset-right))}
+#mic{bottom:max(12px,env(safe-area-inset-bottom));right:max(12px,env(safe-area-inset-right))}
+#mic.on{opacity:1;background:rgba(200,20,10,.5)}
+#mic.wake::after{content:"";position:absolute;top:6px;right:6px;width:7px;height:7px;border-radius:50%;background:#ff3020;box-shadow:0 0 6px #ff3020}
+#settings{inset:0;background:rgba(8,0,0,.94);overflow:auto;color:var(--txt);font:14px/1.4 system-ui,-apple-system,Segoe UI,Roboto,sans-serif;padding:max(14px,env(safe-area-inset-top)) max(16px,env(safe-area-inset-right)) 30px max(16px,env(safe-area-inset-left));cursor:default}
+#settings[hidden],#start[hidden]{display:none}
+#settings .wrap{max-width:860px;margin:0 auto}
+#settings h2{font-size:15px;letter-spacing:.12em;text-transform:uppercase;color:#ff6a5a;margin:18px 0 8px;border-bottom:1px solid #3a0a06;padding-bottom:4px}
+#settings .top{display:flex;justify-content:space-between;align-items:center;gap:10px}
+#settings .top b{color:#ff5a4a;letter-spacing:.15em}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:10px}
+.card{border:1px solid #3a0a06;border-radius:8px;padding:10px;background:rgba(40,4,2,.4)}
+.card.primary{border-color:var(--red)}
+.card h3{margin:0 0 6px;font-size:14px;color:#ffd8d2;display:flex;justify-content:space-between;gap:6px}
+.card small,.note{color:#c08a84;font-size:12px}
+.card a,.note a{color:#ff8a7a}
+#settings input[type=text],#settings input[type=password],#settings input[type=url],#settings select{width:100%;box-sizing:border-box;background:#140101;color:#ffe0da;border:1px solid var(--dim);border-radius:6px;padding:8px;font:inherit;margin:3px 0}
+#settings label{display:block;margin:4px 0}
+#settings label.chk{display:flex;align-items:center;gap:8px}
+#settings input[type=range]{width:100%}
+#settings button{background:#2a0503;color:#ffd0c8;border:1px solid var(--dim);border-radius:6px;padding:8px 12px;font:inherit;cursor:pointer;margin:3px 3px 3px 0}
+#settings button.go{background:#a8140a;color:#fff;border-color:#ff5040}
+.row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.row>input{flex:1;min-width:160px}
+#convoGlow{position:fixed;inset:0;pointer-events:none;z-index:5;opacity:0;transition:opacity .6s;box-shadow:inset 0 0 22px 2px rgba(255,30,10,.22)}
+body.convo #convoGlow{opacity:.55}
+body.convo[data-busy=listening] #convoGlow{opacity:1}
+#status{font:12px ui-monospace,Menlo,monospace;color:#ff9a8a;white-space:pre-wrap;background:#140101;border-radius:6px;padding:8px;min-height:2.4em}
+</style>
+</head>
+<body>
+<canvas id="face"></canvas>
+<div id="scan"></div><div id="band"></div>
+<div id="cap"></div>
+<div id="dbg" hidden></div>
+
+<div id="convoGlow"></div>
+<div id="start" class="ui"><span>tap to wake gibson</span></div>
+<button id="gear" class="ui iconbtn" aria-label="Settings"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3.2"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg></button>
+<button id="mic" class="ui iconbtn" aria-label="Talk"><svg viewBox="0 0 24 24"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></svg></button>
+
+<div id="settings" class="ui" hidden>
+ <div class="wrap">
+  <div class="top"><b>MINI GIBSON · SETTINGS</b><div><button id="sClose" class="go">Done</button></div></div>
+
+  <h2>Talk to Gibson</h2>
+  <div class="row"><input type="text" id="chatIn" placeholder="Type a message and press Enter…" autocomplete="off"><button id="chatGo" class="go">Send</button></div>
+  <div id="status">Ready.</div>
+
+  <h2>Brain</h2>
+  <label>Primary brain (others with keys are automatic fallbacks; the Demo brain is always the last resort)
+   <select id="primary"></select></label>
+  <label>Personality <select id="persona"><option value="andrew">Gibson (default: gentle, curious, Andrew-style)</option><option value="cereal">Cereal mode (hyper 90s hacker, still kind &amp; clean)</option></select></label>
+  <div class="grid" id="provCards"></div>
+  <p class="note">Keys stay in this phone's browser storage (localStorage) and are only sent to that provider. <button id="clearKeys">Clear all keys</button></p>
+
+  <h2>Voice</h2>
+  <div class="grid">
+   <div class="card"><h3><span>Gibson's voice</span><small class="ok" id="nState"></small></h3>
+    <label>Engine <select id="vEngine"><option value="auto">Auto: neural voice if this phone is fast enough, else phone voice</option><option value="neural">Neural voice always (Kokoro; may be slow on some phones)</option><option value="browser">Phone voice (fast, instant replies)</option></select></label>
+    <label>Neural voice <select id="nVoice"></select></label>
+    <label class="chk"><input type="checkbox" id="robot"> Robot-warm effect (subtle metallic shimmer)</label>
+    <label>Speed <span id="rateV"></span><input type="range" id="rate" min="0.6" max="1.6" step="0.05"></label>
+    <label>Neural engine <select id="nDevice"><option value="auto">Auto (GPU if this phone supports it, else CPU)</option><option value="wasm">CPU (WASM, 92 MB download once)</option><option value="webgpu">GPU (WebGPU, 163-326 MB download once)</option></select></label>
+    <button id="testVoice" class="go">Test voice</button>
+    <small id="nNote">The first time, the neural voice downloads once (use Wi-Fi), then works offline. Until it's ready, Gibson uses the phone voice. If he's slow to start talking on this phone, pick “Phone voice (fast)” above.</small></div>
+   <div class="card"><h3><span>Phone voice (fallback)</span></h3>
+    <label>Voice <select id="voice"></select></label>
+    <label>Pitch <span id="pitchV"></span><input type="range" id="pitch" min="0.5" max="1.8" step="0.05"></label>
+    <label>Speech language <input type="text" id="lang" placeholder="en-US"></label></div>
+   <div class="card"><h3><span>Wake word</span><small class="ok" id="wState"></small></h3>
+    <label class="chk"><input type="checkbox" id="wake"> “Hey Gibson” (always listening)</label>
+    <label>Detector <select id="wakeEngine"><option value="ondevice">On-device “Hey Gibson” model (recommended)</option><option value="browser">Browser speech recognition (fallback)</option></select></label>
+    <label>Sensitivity <span id="sensV"></span><input type="range" id="wakeSens" min="0.1" max="0.9" step="0.05"></label>
+    <div class="row"><small>Live score</small><div style="flex:1;height:8px;background:#140101;border:1px solid #3a0a06;border-radius:4px;overflow:hidden"><div id="wMeter" style="height:100%;width:0;background:#ff2a1a;transition:width .1s"></div></div></div>
+    <small id="wakeNote"></small></div>
+   <div class="card"><h3><span>Conversation mode</span></h3>
+    <label class="chk"><input type="checkbox" id="convo"> Keep listening after each reply (no wake word needed between turns)</label>
+    <label>End after silence <span id="ctoV"></span><input type="range" id="convoTimeout" min="10" max="60" step="5"></label>
+    <small>Say “stop listening”, “that's all”, “never mind” or “bye Gibson” to end it. Interrupt him any time by tapping the screen or saying “Hey Gibson”.</small></div>
+  </div>
+
+  <h2>Display &amp; robot</h2>
+  <div class="grid">
+   <div class="card">
+    <label class="chk"><input type="checkbox" id="robotOffset"> Robot window offset (shift face 70 px for the Gibson head)</label>
+    <label class="chk"><input type="checkbox" id="safe"> Show visible-window guide</label>
+    <button id="fs">Fullscreen</button> <button id="faceDbg">Face debug panel</button> <button id="demoMode">Expression demo</button></div>
+   <div class="card">
+    <label class="chk"><input type="checkbox" id="head"> Head movement (ESP32)</label>
+    <div id="headOpts"><label>Link <select id="headTransport"><option value="websocket">WebSocket</option><option value="bluetooth">Web Bluetooth (TODO)</option><option value="serial">Web Serial (TODO)</option></select></label>
+     <label>WebSocket URL <input type="url" id="headUrl" placeholder="wss://gibson.local/ws"></label></div>
+    <small>Off = nothing is sent. Stub for now: sends {cmd:"look",x,y} / {cmd:"nod"} JSON when on. Firmware link is a TODO.</small></div>
+  </div>
+  <p class="note">Mini Gibson app · face engine v1 · <span id="ver"></span></p>
+ </div>
+</div>
+
+<script>window.GIBSON_APP = true;</script>
+<script src="face.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
