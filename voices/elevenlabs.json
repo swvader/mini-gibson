@@ -1,0 +1,11 @@
+{
+  "provider": "elevenlabs",
+  "note": "Original voices made with ElevenLabs Voice Design (eleven_ttv_v3), styled after a 90s NYC hacker / hippie character. No cloning. API key is NOT stored here; use ELEVENLABS_API_KEY.",
+  "created": "2026-10-06",
+  "recommended_tts_model": "eleven_flash_v2_5",
+  "voices": [
+    {"name": "Gibson Cereal A", "voice_id": "aM2I6Vo8BJzQdxSHsJLD", "sample": "voice-samples/eleven-cereal-a.mp3", "summary": "Closest overall: mid-high nasal rasp, laid-back drawl with wide pitch swings and quick bursts (~169 Hz median, 16 st range)"},
+    {"name": "Gibson Cereal B", "voice_id": "35TDAArJ7p2w9BriPbi5", "sample": "voice-samples/eleven-cereal-b.mp3", "summary": "Raspiest and most manic: brighter, choppier stop-start bursts (~185 Hz, 15 st)"},
+    {"name": "Gibson Cereal C", "voice_id": "PMOocVoKCEltMVu66gnd", "sample": "voice-samples/eleven-cereal-c.mp3", "summary": "Mellowest: a bit lower and warmer, smoother stoner drawl (~152 Hz, 13 st)"}
+  ]
+}
