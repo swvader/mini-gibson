@@ -338,6 +338,49 @@ public class MainActivity extends ComponentActivity {
     } finally { img.close(); }
   }
 
+  // ------------------------------------------------------------------ brain HTTP (streamed back to JS)
+  final ExecutorService httpExec = Executors.newCachedThreadPool();
+  final java.util.concurrent.ConcurrentHashMap<Integer, java.net.HttpURLConnection> conns = new java.util.concurrent.ConcurrentHashMap<>();
+  String certSha1;
+  String certSha1() {
+    if (certSha1 != null) return certSha1;
+    try {
+      android.content.pm.PackageInfo pi = getPackageManager().getPackageInfo(getPackageName(), PackageManager.GET_SIGNING_CERTIFICATES);
+      byte[] d = java.security.MessageDigest.getInstance("SHA-1").digest(pi.signingInfo.getApkContentsSigners()[0].toByteArray());
+      StringBuilder b = new StringBuilder(); for (byte x : d) b.append(String.format("%02X", x)); certSha1 = b.toString();
+    } catch (Throwable e) { certSha1 = ""; }
+    return certSha1;
+  }
+  void http(int id, String url, String method, String headers, String body) {
+    httpExec.execute(() -> {
+      java.net.HttpURLConnection c = null;
+      try {
+        c = (java.net.HttpURLConnection) new java.net.URL(url).openConnection(); conns.put(id, c);
+        c.setConnectTimeout(15000); c.setReadTimeout(30000); c.setRequestMethod(method);
+        JSONObject h = new JSONObject(headers); java.util.Iterator<String> it = h.keys();
+        while (it.hasNext()) { String k = it.next(); c.setRequestProperty(k, h.getString(k)); }
+        // same identity as the web version (keys restricted to the GitHub Pages site keep working) + Android app identity
+        c.setRequestProperty("Referer", "https://swvader.github.io/mini-gibson/");
+        c.setRequestProperty("X-Android-Package", getPackageName()); c.setRequestProperty("X-Android-Cert", certSha1());
+        if (body != null && !body.isEmpty()) { c.setDoOutput(true); try (OutputStream o = c.getOutputStream()) { o.write(body.getBytes("UTF-8")); } }
+        int st = c.getResponseCode();
+        emit("http", J("id", id, "status", st, "ctype", String.valueOf(c.getContentType())));
+        InputStream in = st >= 400 ? c.getErrorStream() : c.getInputStream();
+        if (in != null) {
+          java.io.BufferedReader r = new java.io.BufferedReader(new java.io.InputStreamReader(in, "UTF-8"));
+          String line; StringBuilder sb = new StringBuilder();
+          while ((line = r.readLine()) != null) {
+            sb.append(line).append('\n');
+            if (line.isEmpty() || sb.length() > 8192) { emit("http", J("id", id, "chunk", sb.toString())); sb.setLength(0); }   // one SSE event at a time
+          }
+          if (sb.length() > 0) emit("http", J("id", id, "chunk", sb.toString()));
+        }
+        emit("http", J("id", id, "done", true));
+      } catch (Throwable e) { emit("http", J("id", id, "error", String.valueOf(e))); }
+      finally { conns.remove(id); if (c != null) c.disconnect(); }
+    });
+  }
+
   // ------------------------------------------------------------------ JS bridge
   class Bridge {
     @JavascriptInterface public String info() { return J("app", "1.0.2", "cores", Runtime.getRuntime().availableProcessors(), "model", "kokoro-int8-multi-lang-v1_0").toString(); }
@@ -360,6 +403,8 @@ public class MainActivity extends ComponentActivity {
     }
     @JavascriptInterface public String camInfo() { return J("on", camProvider != null, "frames", camFrames, "photoAge", lastJpeg == null ? -1 : System.currentTimeMillis() - lastJpegAt, "face", faceOn, "err", camErr).toString(); }
     @JavascriptInterface public void say(int id, String text, float rate, float pitch) { main.post(() -> phoneSay(id, text, rate, pitch)); }
+    @JavascriptInterface public void http(int id, String url, String method, String headers, String body) { MainActivity.this.http(id, url, method, headers, body); }
+    @JavascriptInterface public void httpAbort(int id) { java.net.HttpURLConnection c = conns.remove(id); if (c != null) httpExec.execute(c::disconnect); }
     @JavascriptInterface public void exit() { main.post(MainActivity.this::finish); }
   }
 }

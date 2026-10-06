@@ -62,6 +62,8 @@ async function fetchT(url, opts, ms) {
 }
 function textOf(c) { if (typeof c === 'string') return c; if (Array.isArray(c)) return c.map(p => p.text || '').join(''); return ''; }
 // Server-sent events reader: calls onData(dataString) per event. Aborts if the stream goes quiet for `idleMs`.
+const brainFetch = (url, opts) => window.GibsonNativeFetch ? window.GibsonNativeFetch(url, opts) : fetch(url, opts);
+let lastBrain = {};
 async function readSSE(r, onData, ac, idleMs) {
   const rd = r.body.getReader(), dec = new TextDecoder(); let buf = '', t = 0;
   const arm = () => { clearTimeout(t); t = setTimeout(() => ac.abort(), idleMs || 15000); };
@@ -77,7 +79,7 @@ async function readSSE(r, onData, ac, idleMs) {
   } finally { clearTimeout(t); }
 }
 // Questions that need live info get Gemini's web search; everything else skips it (search adds latency).
-const LIVE_RE = /\b(news|headlines?|today|tonight|tomorrow|yesterday|this (?:week|weekend|morning|afternoon|evening|month|year)|latest|current(?:ly)?|right now|recent(?:ly)?|scores?|game|games|match|won|win|winning|playing|standings|playoffs?|price|prices|cost|costs|stocks?|bitcoin|crypto|market|open|opens|close|closes|closed|hours|election|president|release[sd]?|update[sd]?|traffic|showtimes?|movies?|events?|concerts?|near me|nearby|restaurants?|look (?:it )?up|search|google|who is|who's|what happened|when is|schedule)\b/i;
+const LIVE_RE = /\b(news|headlines?|today|tonight|tomorrow|yesterday|this (?:week|weekend|morning|afternoon|evening|month|year)|latest|current(?:ly)?|right now|recent(?:ly)?|scores?|game|games|match|won|win|winning|playing|standings|playoffs?|price|prices|cost|costs|stocks?|bitcoin|crypto|market|open|opens|close|closes|closed|hours|election|president|release[sd]?|update[sd]?|traffic|showtimes?|movies?|events?|concerts?|near me|nearby|restaurants?|look (?:it )?up|search|google|who is|who's|what happened|when is|schedule|shares?|trading|nasdaq|dow|s&p|ticker|ethereum|dogecoin|exchange rate|interest rates?|worth|weather|forecast|temperature|rain(?:ing)?|snow(?:ing)?)\b/i;
 // thinking off/minimal where the model allows it (it adds seconds before the first word). Best first; cached per model.
 function thinkOpts(model) {
   const m = model.toLowerCase();
@@ -102,10 +104,11 @@ async function gemini(msgs, onText, live) {
         if (search) body.tools = [{ google_search: {} }];
         const ac = new AbortController(), to = setTimeout(() => ac.abort(), 20000);
         let r;
-        try { r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:streamGenerateContent?alt=sse&key=${key}`,
+        try { r = await brainFetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:streamGenerateContent?alt=sse&key=${key}`,
           { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body), signal: ac.signal }); }
         finally { clearTimeout(to); }
         if (r.ok) {
+          lastBrain = { model, search };
           if (S.models.gemini !== model) { S.models.gemini = model; try { save(); } catch (e) {} }
           if (thinkOk[model] !== ti) { thinkOk[model] = ti; try { localStorage.setItem('gibson.gthink', JSON.stringify(thinkOk)); } catch (e) {} }
           let out = '';
@@ -138,7 +141,8 @@ async function callProvider(id, msgs, onText, live) {
   if (!p.custom && onText) body.stream = true;
   const headers = { 'Content-Type': 'application/json' }; if (key) headers.Authorization = 'Bearer ' + key;
   const ac = new AbortController(), to = setTimeout(() => ac.abort(), 25000);
-  let r; try { r = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body), signal: ac.signal }); } finally { clearTimeout(to); }
+  lastBrain = { model: model || '', search: false };
+  let r; try { r = await brainFetch(url, { method: 'POST', headers, body: JSON.stringify(body), signal: ac.signal }); } finally { clearTimeout(to); }
   if (!r.ok) throw new Error(`HTTP ${r.status} ${(await r.text()).slice(0, 140)}`);
   if (/event-stream/.test(r.headers.get('content-type') || '')) {
     let out = '';
@@ -193,21 +197,33 @@ async function brain(userText, onText) {
       onText && onText(raw); remember('assistant', raw); return { raw, provider: 'camera', errors: ['no camera photo'], live: false };
     }
   } else Turn.photo = null;
-  for (const id of chain()) {
+  // real brains only; the demo brain is only for the web demo with no key at all (never answers a real question when a key exists)
+  const real = chain().filter(x => x !== 'demo');
+  if (!real.length && window.GIBSON_NATIVE) {
+    const raw = "[confused] I don't have a brain key in this app yet. Open Settings, paste your Gemini key under Brain, then ask me again.";
+    Turn.brainUsed = 'none (no key in this app)'; onText && onText(raw); return { raw, provider: 'none', errors: ['no key'], live };
+  }
+  for (const id of real.length ? real : ['demo']) {
     let got = '';
     try {
       const msgs = history.slice();
       if (wx && id !== 'demo') msgs[msgs.length - 1] = { role: 'user', content: `${userText}\n\n(${wx})` };
       if (img && id !== 'demo') msgs[msgs.length - 1] = { role: 'user', content: msgs[msgs.length - 1].content + '\n\n(Attached: a photo taken a moment ago by your camera eyes, the phone\'s front camera, which faces the person talking to you. Look at it carefully and answer the actual question using what is really in the photo: name the concrete things you see (objects, colors, text, what the person is holding or wearing). 1 to 3 short sentences. Never make things up; if the photo is dark or blurry, say so.)', image: img };
+      lastBrain = {};
       const raw = await callProvider(id, msgs, t => { got += t; onText && onText(t); }, live);
-      remember('assistant', raw);
-      return { raw, provider: id, errors, live };
+      remember('assistant', raw); noteBrain(id, errors);
+      return { raw, provider: id, errors, live: !!lastBrain.search };
     } catch (e) {
-      if (got.trim()) { remember('assistant', got); return { raw: got, provider: id, errors, live }; }   // cut off mid-reply: keep what was said
+      if (got.trim()) { remember('assistant', got); noteBrain(id, errors); return { raw: got, provider: id, errors, live: !!lastBrain.search }; }   // cut off mid-reply: keep what was said
       errors.push(`${PROVIDERS[id].label}: ${e.name === 'AbortError' ? 'timeout' : (e.message || e)}`);
     }
   }
-  return { raw: '[error] My thinking circuits are tangled. Please try again.', provider: 'none', errors };
+  Turn.brainUsed = 'FAILED: ' + errors.join(' | ');
+  const why = /API_KEY_INVALID|API key not valid/i.test(errors.join(' ')) ? 'my brain key was refused' : /referer|referrer|blocked/i.test(errors.join(' ')) ? 'my key is blocked for this app' : /429|quota|RESOURCE_EXHAUSTED/i.test(errors.join(' ')) ? 'my brain is out of free quota for now' : /timeout|network|Failed to fetch/i.test(errors.join(' ')) ? 'the internet connection failed' : 'something went wrong';
+  return { raw: `[sad] I can't reach my brain right now: ${why}. The details are in Settings.`, provider: 'none', errors };
+}
+function noteBrain(id, errors) {
+  Turn.brainUsed = `${PROVIDERS[id].label.replace(/ \(.*$/, '')}${lastBrain.model ? ' ' + lastBrain.model : ''}${lastBrain.search ? ' + Google Search' : id === 'demo' ? '' : ' (no search)'}${errors.length ? ' (after: ' + errors.join(' | ').slice(0, 120) + ')' : ''}`;
 }
 // "[happy] Hello!" -> {expr:'happy', text:'Hello!'}
 const NAMES = new Map(EXPR.map(n => [n.toLowerCase(), n]));
@@ -672,7 +688,7 @@ async function signOff() {
 // last-turn timing, shown in Settings so real phone numbers can be screenshotted
 const Turn = { show() {
   const el = document.getElementById('timing'); if (!el) return; const f = x => x == null ? '–' : Math.round(x) + ' ms';
-  el.textContent = `Last turn: heard you → first AI words ${f(this.brain)} · first words → Gibson voice ${f(this.tts)} · total until he spoke ${f(this.total)}${this.filler ? ' · filler ' + this.filler.toFixed(1) + ' s' : ''}${this.vision ? ' · camera photo attached: ' + (this.photo || 'no') : ''}\nVoice speed: ${Neural.rtf ? 'real-time factor ' + Neural.rtf.toFixed(2) + (Neural.rtf < 1 ? ' (faster than real time)' : ' (slower than real time)') : '–'} · ${Neural.backend || Neural.msg || ''}`;
+  el.textContent = `Last turn: heard you → first AI words ${f(this.brain)} · first words → Gibson voice ${f(this.tts)} · total until he spoke ${f(this.total)}${this.filler ? ' · filler ' + this.filler.toFixed(1) + ' s' : ''}${this.vision ? ' · camera photo attached: ' + (this.photo || 'no') : ''}\nBrain: ${this.brainUsed || '–'}\nVoice speed: ${Neural.rtf ? 'real-time factor ' + Neural.rtf.toFixed(2) + (Neural.rtf < 1 ? ' (faster than real time)' : ' (slower than real time)') : '–'} · ${Neural.backend || Neural.msg || ''}`;
 } };
 async function ask(text) {
   text = String(text || '').trim(); if (!text) return;
@@ -682,7 +698,7 @@ async function ask(text) {
   setBusy('thinking'); G.think(true); Head.look(0.4, -0.3);
   Wake.resume(true);                                        // detector stays on while thinking/speaking, so "Hey Gibson" can interrupt
   const vision = !!(window.GibsonSnap && VISION_RE.test(text));
-  Object.assign(Turn, { t0: performance.now(), brain: null, tts: null, total: null, filler: 0, vision });
+  Object.assign(Turn, { t0: performance.now(), brain: null, tts: null, total: null, filler: 0, vision, brainUsed: '' });
   if (vision) G.setExpression('curious', 250);
   Filler.arm(my, window.GIBSON_NATIVE ? (vision ? 1 : 600) : 1200, vision ? 'look' : 'think');   // a short line if the answer takes a moment
   const t0 = performance.now();
@@ -706,6 +722,7 @@ async function ask(text) {
   if (!sp) { clearTimeout(Filler.t); expr = ex; sp = Speech(onStart); sp.push(reply); }
   sp.end();
   status(`You: ${text}\nGibson [${expr}] via ${PROVIDERS[res.provider] ? PROVIDERS[res.provider].label : res.provider}${res.live ? ' + web search' : ''} (${Math.round(performance.now() - t0)} ms, voice: ${sp.eng}): ${reply}` + (res.errors.length ? `\nFell back after: ${res.errors.join(' | ')}` : ''));
+  Turn.show();
   await sp.done;
   if (my !== reqId) return { cancelled: true };
   afterSpeech();

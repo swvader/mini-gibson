@@ -16,6 +16,7 @@
       if (!opt.faceTrack || !window.Gibson) return;
       if (d.none) Gibson.lookAt(null); else Gibson.lookAt(Math.max(-1, Math.min(1, d.x * 1.3)), Math.max(-1, Math.min(1, d.y * 1.1)));
     } else if (type === 'snap') { const f = snaps.get(d.id); if (f) { snaps.delete(d.id); f(d.b64 || null); } }
+    else if (type === 'http') { const f = https.get(d.id); if (f) f(d); }
     else if (type === 'say') window.__nativeSayDone(d);
     else if (type === 'cam') { if (d.error) { console.warn('[gibson] camera: ' + d.error); camErr = d.error; } }
     else if (type === 'perm') { if (opt.faceTrack) N.camStart(); }
@@ -80,6 +81,22 @@
     }
   }
   window.GibsonNativeTts = NativeTts;
+
+  // brain requests through the app's own networking (streams like fetch; sends the GitHub Pages site as referrer)
+  const https = new Map(); let httpId = 0;
+  window.GibsonNativeFetch = (url, opts) => new Promise((resolve, reject) => {
+    opts = opts || {}; const id = ++httpId; let ctl = null, done = false;
+    const stream = new ReadableStream({ start(c) { ctl = c; } });
+    const fail = e => { if (done) return; done = true; https.delete(id); try { ctl.error(e); } catch (x) {} reject(e); };
+    https.set(id, d => {
+      if (d.error) return fail(new TypeError('network: ' + d.error));
+      if (d.status) resolve(new Response(stream, { status: d.status, headers: { 'content-type': d.ctype || 'application/json' } }));
+      if (d.chunk) ctl.enqueue(new TextEncoder().encode(d.chunk));
+      if (d.done) { done = true; https.delete(id); try { ctl.close(); } catch (x) {} }
+    });
+    if (opts.signal) opts.signal.addEventListener('abort', () => { N.httpAbort(id); fail(new DOMException('aborted', 'AbortError')); });
+    N.http(id, url, opts.method || 'GET', JSON.stringify(opts.headers || {}), opts.body || '');
+  });
 
   const says = new Map(); let sayId = 0;
   function wavToFloat(buf) {
