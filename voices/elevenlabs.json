@@ -28,7 +28,7 @@
       "parent": "PMOocVoKCEltMVu66gnd",
       "sample": "voice-samples/eleven-cereal-c2.mp3",
       "summary": "Remix of C, closest to reference: ~0.6 st higher, punchier (shorter vowels, more quick pauses), raspier, thinner/brighter (155 Hz, 14.3 st, 5.0 syl/s, 16.6 pauses/min, HNR 9.0)",
-      "status": "rejected: too old and gravelly"
+      "status": "rejected (too old and gravelly); voice deleted from ElevenLabs account 2026-10-06"
     },
     {
       "name": "Gibson Cereal C3",
@@ -36,24 +36,40 @@
       "parent": "PMOocVoKCEltMVu66gnd",
       "sample": "voice-samples/eleven-cereal-c3.mp3",
       "summary": "Subtle remix of C, keeps C's timbre: wider pitch swings, more pauses, a bit raspier (147 Hz, 14.9 st, 5.1 syl/s, 13.5 pauses/min, HNR 9.1)",
-      "status": "rejected: too old and gravelly"
+      "status": "rejected (too old and gravelly); voice deleted from ElevenLabs account 2026-10-06"
     },
     {
       "name": "Gibson Cereal Y1",
       "voice_id": "A8MwwT6b6Iw2HjLt3zEG",
       "parent": "PMOocVoKCEltMVu66gnd",
       "sample": "voice-samples/eleven-cereal-y1.mp3",
-      "summary": "Youthful remix of C, closest to reference: 168 Hz median, 13.6 st range, smoother (HNR 10.7 dB), relaxed pace"
+      "summary": "Youthful remix of C, closest to reference: 168 Hz median, 13.6 st range, smoother (HNR 10.7 dB), relaxed pace",
+      "status": "superseded: too much rasp"
     },
     {
       "name": "Gibson Cereal Y2",
       "voice_id": "uShOeRMc5NUpkQDFq0vd",
       "parent": "PMOocVoKCEltMVu66gnd",
       "sample": "voice-samples/eleven-cereal-y2.mp3",
-      "summary": "Youthful remix of C, a touch higher and quicker: 177 Hz, 12.8 st, smoother (HNR 10.6 dB)"
+      "summary": "Youthful remix of C, a touch higher and quicker: 177 Hz, 12.8 st, smoother (HNR 10.6 dB)",
+      "status": "superseded: too much rasp"
+    },
+    {
+      "name": "Gibson Cereal Z1",
+      "voice_id": "Kj0eLqQQk3rmV3ZPTtlg",
+      "parent": "A8MwwT6b6Iw2HjLt3zEG",
+      "sample": "voice-samples/eleven-cereal-z1.mp3",
+      "summary": "Clean remix of Y1, smoothest: 186 Hz median, 13.9 st, HNR 11.9 dB, formants 541/1593/2558 (ref 556/1609/2565)"
+    },
+    {
+      "name": "Gibson Cereal Z2",
+      "voice_id": "S53SFP7QNPOTVJuhCoSx",
+      "parent": "A8MwwT6b6Iw2HjLt3zEG",
+      "sample": "voice-samples/eleven-cereal-z2.mp3",
+      "summary": "Clean remix of Y1, a bit brighter/nasal, rate closest to ref: 185 Hz, 13.9 st, HNR 11.4 dB, 5.34 syl/s (ref 5.38)"
     }
   ],
-  "picked": "Gibson Cereal C was \"almost right\"; C2/C3 rejected (too old/gravelly); Y1/Y2 are youthful remixes of C (2026-10-06)",
+  "picked": "C \"almost right\"; C2/C3 too old/gravelly (deleted from account); Y1/Y2 still too raspy; Z1/Z2 = clean remixes of Y1 (2026-10-06)",
   "reference_prosody": {
     "source": "analysis only of natural-speech lines in a public clip compilation (reading/broadcast section, other characters excluded); audio deleted, never uploaded",
     "spans_s": [
@@ -99,5 +115,76 @@
       2487
     ],
     "syl_per_s_wordtime": 3.95
+  },
+  "reference_prosody_v2": {
+    "source": "analysis only of natural-speech lines in a second public clip compilation (reading/broadcast, other characters, chants excluded); audio deleted, never uploaded; this is now the primary reference",
+    "spans_s": [
+      [
+        0,
+        15.3
+      ],
+      [
+        17.1,
+        20.8
+      ],
+      [
+        65.2,
+        77.1
+      ],
+      [
+        122.6,
+        130.8
+      ],
+      [
+        136.2,
+        149.9
+      ],
+      [
+        179.3,
+        182.3
+      ],
+      [
+        218.1,
+        219.9
+      ],
+      [
+        299.3,
+        310.1
+      ],
+      [
+        403.0,
+        411.7
+      ],
+      [
+        453.5,
+        455.1
+      ],
+      [
+        457.5,
+        462.5
+      ],
+      [
+        466.4,
+        470.7
+      ],
+      [
+        495.1,
+        499.6
+      ]
+    ],
+    "f0_median_hz": 180,
+    "f0_p10_p90_hz": [
+      123,
+      279
+    ],
+    "range_st_p10_p90": 14.2,
+    "syl_per_s_wordtime": 5.38,
+    "hnr_db": 7.1,
+    "hnr_note": "film audio (music/room noise) caps measured HNR; cleanest spans ~10 dB, so treat as a floor",
+    "formants_hz": [
+      556,
+      1609,
+      2565
+    ]
   }
 }
