@@ -10,7 +10,7 @@ const LS = 'gibson.app.v1';
 const DEFAULTS = {
   primary: 'demo',
   keys: { grok: '', gemini: '', openai: '', meta: '', custom: '' },
-  models: { grok: 'grok-4.20-0309-non-reasoning', gemini: 'gemini-flash-latest', openai: 'gpt-6-luna', meta: 'muse-spark-1.1', custom: '' },
+  models: { grok: 'grok-4.20-0309-non-reasoning', gemini: 'gemini-2.5-flash', openai: 'gpt-6-luna', meta: 'muse-spark-1.1', custom: '' },
   customUrl: '', voice: '', rate: 1.0, pitch: 1.1, lang: 'en-US', wake: false,
   persona: 'andrew', vEngine: 'auto', nVoice: 'gibson', pVoice: 'norman', filler: true, robot: false, nDevice: 'auto', wakeEngine: 'ondevice', wakeSens: 0.5, convo: true, convoTimeout: 25, endPause: 1.4,
   robotOffset: false, safe: false, head: false, headTransport: 'websocket', headUrl: ''
@@ -23,6 +23,14 @@ let S = load();
 if (S.vEngineV !== 2) { if (S.vEngine === 'neural') S.vEngine = 'auto'; S.vEngineV = 2; save(); }   // one-time move from the old 'neural' default to Auto
 if (window.GIBSON_NATIVE && S.vEngine !== 'browser') S.vEngine = 'neural';   // Android app: Gibson voice always, never an automatic fallback
 function save() { try { localStorage.setItem(LS, JSON.stringify(S)); } catch (e) {} }
+// one-time: a lite (or stale auto-picked) Gemini model goes back to the recommended default
+if (S.modelsV !== 2) { if (!S.models.gemini || /lite/i.test(S.models.gemini) || S.models.gemini === 'gemini-3.8-flash') S.models.gemini = DEFAULTS.models.gemini; S.modelsV = 2; save(); }
+// model menus in Settings (anything else: 'Custom…' + text box)
+const MODEL_OPTS = {
+  gemini: [['gemini-2.5-flash', 'gemini-2.5-flash (default, recommended)'], ['gemini-flash-latest', 'gemini-flash-latest'], ['gemini-2.5-pro', 'gemini-2.5-pro (smartest, slower)'], ['gemini-2.0-flash', 'gemini-2.0-flash'], ['gemini-flash-lite-latest', 'gemini-flash-lite-latest (fastest, weakest)']],
+  grok: [['grok-4.20-0309-non-reasoning', 'grok-4.20-0309-non-reasoning (default)']],
+  openai: [['gpt-6-luna', 'gpt-6-luna (default)']]
+};
 
 // ------------------------------------------------------------------ providers
 const PROVIDERS = {
@@ -89,11 +97,15 @@ function thinkOpts(model) {
   return [{ thinkingLevel: 'minimal' }, { thinkingLevel: 'low' }, { thinkingBudget: 0 }, null];
 }
 const thinkOk = (() => { try { return JSON.parse(localStorage.getItem('gibson.gthink') || '{}'); } catch (e) { return {}; } })();
+let geminiSession = null;
 async function gemini(msgs, onText, live) {
   const key = encodeURIComponent(S.keys.gemini.trim());
   const contents = msgs.map(m => ({ role: m.role === 'assistant' ? 'model' : 'user', parts: m.image ? [{ inlineData: { mimeType: 'image/jpeg', data: m.image } }, { text: m.content }] : [{ text: m.content }] }));
   // try the chosen model, then well-known free-tier aliases if that model name is unknown or busy
-  const tries = [...new Set([S.models.gemini === 'gemini-3.8-flash' ? '' : S.models.gemini, 'gemini-flash-latest', 'gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-flash-lite-latest'].filter(Boolean))];
+  // chosen model first; fallbacks only for this request (a non-lite fallback that worked is remembered for this session only; nothing is saved)
+  const chosen = S.models.gemini || DEFAULTS.models.gemini;
+  if (geminiSession && geminiSession.chosen !== chosen) geminiSession = null;
+  const tries = [...new Set([geminiSession && geminiSession.model, chosen, 'gemini-2.5-flash', 'gemini-flash-latest', 'gemini-2.0-flash', 'gemini-flash-lite-latest'].filter(Boolean))];
   let lastErr = '';
   for (const search of live ? [true, false] : [false]) {          // last resort: same request without web search
     for (const model of tries) {
@@ -109,7 +121,7 @@ async function gemini(msgs, onText, live) {
         finally { clearTimeout(to); }
         if (r.ok) {
           lastBrain = { model, search };
-          if (S.models.gemini !== model) { S.models.gemini = model; try { save(); } catch (e) {} }
+          geminiSession = model !== chosen && !/lite/i.test(model) ? { chosen, model } : null;   // never written to settings
           if (thinkOk[model] !== ti) { thinkOk[model] = ti; try { localStorage.setItem('gibson.gthink', JSON.stringify(thinkOk)); } catch (e) {} }
           let out = '';
           try {
@@ -1081,7 +1093,7 @@ function buildCards() {
     return `<div class="card" data-p="${id}"><h3><span>${p.label}</span><small class="ok" data-ok="${id}"></small></h3>
       ${p.custom ? `<label>URL (OpenAI-compatible /chat/completions)<input type="url" data-k="customUrl" placeholder="https://…/v1/chat/completions"></label>` : ''}
       <label>API key <input type="password" data-key="${id}" placeholder="${p.hint}" autocomplete="off" autocapitalize="off" spellcheck="false"></label>
-      <label>Model <input type="text" data-model="${id}" placeholder="${DEFAULTS.models[id] || 'model id'}" autocapitalize="off" spellcheck="false"></label>
+      <label>Model ${MODEL_OPTS[id] ? `<select data-msel="${id}">${MODEL_OPTS[id].map(([v, t]) => `<option value="${v}">${t}</option>`).join('')}<option value="__custom">Custom…</option></select>` : ''}<input type="text" data-model="${id}" placeholder="${MODEL_OPTS[id] ? 'custom model id' : DEFAULTS.models[id] || 'model id'}" autocapitalize="off" spellcheck="false"></label>
       <div class="row">${p.keyLink ? `<small><a href="${p.keyLink}" target="_blank" rel="noopener">Get a key ↗</a></small>` : '<small>Reserved for The Gibson / Grok Bot server.</small>'}
       <button data-test="${id}">Test</button></div></div>`;
   }).join('');
@@ -1090,6 +1102,11 @@ function syncUI() {
   $('#primary').value = S.primary; $('#persona').value = S.persona;
   document.querySelectorAll('[data-key]').forEach(i => { i.value = S.keys[i.dataset.key] || ''; });
   document.querySelectorAll('[data-model]').forEach(i => { i.value = S.models[i.dataset.model] || ''; });
+  document.querySelectorAll('[data-msel]').forEach(sel => {
+    const id = sel.dataset.msel, v = S.models[id] || DEFAULTS.models[id], known = MODEL_OPTS[id].some(([x]) => x === v);
+    if (sel.value !== '__custom' || known) sel.value = known ? v : '__custom';
+    const box = document.querySelector(`[data-model="${id}"]`); if (box) box.hidden = sel.value !== '__custom';
+  });
   const cu = document.querySelector('[data-k="customUrl"]'); if (cu) cu.value = S.customUrl;
   document.querySelectorAll('.card[data-p]').forEach(c => c.classList.toggle('primary', c.dataset.p === S.primary));
   document.querySelectorAll('[data-ok]').forEach(s => { s.textContent = usable(s.dataset.ok) ? '● ready' : ''; });
@@ -1112,7 +1129,9 @@ function bindSettings() {
   $('#settings').addEventListener('input', e => {
     const el = e.target;
     if (el.dataset.key) S.keys[el.dataset.key] = el.value.trim();
-    else if (el.dataset.model) S.models[el.dataset.model] = el.value.trim();
+    else if (el.dataset.model) S.models[el.dataset.model] = el.value.trim() || DEFAULTS.models[el.dataset.model];
+    else if (el.dataset.msel) { const id = el.dataset.msel, box = document.querySelector(`[data-model="${id}"]`);
+      if (el.value === '__custom') { box.hidden = false; box.value = ''; box.focus(); } else { S.models[id] = el.value; box.hidden = true; } }
     else if (el.dataset.k === 'customUrl') S.customUrl = el.value.trim();
     else if (el.id === 'primary') S.primary = el.value;
     else if (el.id === 'voice') S.voice = el.value;
