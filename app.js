@@ -165,20 +165,22 @@ let wxPos = null;
 function getPos() {
   return new Promise((res) => {
     if (wxPos && Date.now() - wxPos.t < 30 * 60e3) return res(wxPos);
-    if (!navigator.geolocation) return res(null);
+    if (!navigator.geolocation) return res({ lat: 26.976, lon: -82.09, fallback: 'unavailable' });
     navigator.geolocation.getCurrentPosition(p => { wxPos = { lat: p.coords.latitude, lon: p.coords.longitude, t: Date.now() }; res(wxPos); },
-      () => res(null), { enableHighAccuracy: false, timeout: 8000, maximumAge: 30 * 60e3 });
+      e => res({ lat: 26.976, lon: -82.09, fallback: e && e.code === 1 ? 'denied' : 'unavailable' }),   // Charlotte County, FL (Port Charlotte)
+      { enableHighAccuracy: false, timeout: 8000, maximumAge: 30 * 60e3 });
   });
 }
 const WMO = { 0: 'clear', 1: 'mostly clear', 2: 'partly cloudy', 3: 'overcast', 45: 'foggy', 48: 'foggy', 51: 'light drizzle', 53: 'drizzle', 55: 'heavy drizzle', 61: 'light rain', 63: 'rain', 65: 'heavy rain', 71: 'light snow', 73: 'snow', 75: 'heavy snow', 80: 'rain showers', 81: 'rain showers', 82: 'heavy rain showers', 95: 'thunderstorms', 96: 'thunderstorms with hail', 99: 'thunderstorms with hail' };
 async function weatherContext() {
   const p = await getPos();
-  if (!p) return 'Live weather: unavailable (location permission denied). Tell Lenny to allow location for this site.';
+  if (!p) return 'Live weather: unavailable.';
+  const where = p.fallback ? `Charlotte County, Florida (Lenny's home area: his phone's location was ${p.fallback === 'denied' ? 'not allowed' : 'not available'}, so say briefly that this is for Charlotte County)` : "Lenny's location";
   try {
     const u = `https://api.open-meteo.com/v1/forecast?latitude=${p.lat.toFixed(3)}&longitude=${p.lon.toFixed(3)}&current=temperature_2m,apparent_temperature,relative_humidity_2m,weather_code,wind_speed_10m,precipitation&daily=temperature_2m_max,temperature_2m_min,precipitation_probability_max,weather_code&hourly=precipitation_probability&forecast_days=2&temperature_unit=fahrenheit&wind_speed_unit=mph&precipitation_unit=inch&timezone=auto`;
     const j = await (await fetchT(u, {}, 10000)).json();
     const c = j.current, d = j.daily;
-    return `Live weather at Lenny's location right now: ${Math.round(c.temperature_2m)}°F (feels like ${Math.round(c.apparent_temperature)}°F), ${WMO[c.weather_code] || 'mixed'}, humidity ${c.relative_humidity_2m}%, wind ${Math.round(c.wind_speed_10m)} mph. Today: high ${Math.round(d.temperature_2m_max[0])}°F, low ${Math.round(d.temperature_2m_min[0])}°F, ${d.precipitation_probability_max[0]}% chance of rain, ${WMO[d.weather_code[0]] || ''}. Tomorrow: high ${Math.round(d.temperature_2m_max[1])}°F, low ${Math.round(d.temperature_2m_min[1])}°F, ${d.precipitation_probability_max[1]}% chance of rain, ${WMO[d.weather_code[1]] || ''}. Use this real data; say temperatures as whole numbers in degrees.`;
+    return `Live weather at ${where} right now: ${Math.round(c.temperature_2m)}°F (feels like ${Math.round(c.apparent_temperature)}°F), ${WMO[c.weather_code] || 'mixed'}, humidity ${c.relative_humidity_2m}%, wind ${Math.round(c.wind_speed_10m)} mph. Today: high ${Math.round(d.temperature_2m_max[0])}°F, low ${Math.round(d.temperature_2m_min[0])}°F, ${d.precipitation_probability_max[0]}% chance of rain, ${WMO[d.weather_code[0]] || ''}. Tomorrow: high ${Math.round(d.temperature_2m_max[1])}°F, low ${Math.round(d.temperature_2m_min[1])}°F, ${d.precipitation_probability_max[1]}% chance of rain, ${WMO[d.weather_code[1]] || ''}. Use this real data; say temperatures as whole numbers in degrees.`;
   } catch (e) { return 'Live weather: the weather service did not answer right now.'; }
 }
 // Ask the brain chain; auto-fallback to the next provider on any failure (only if nothing was streamed yet).

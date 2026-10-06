@@ -19,6 +19,7 @@ import android.speech.tts.UtteranceProgressListener;
 import android.util.Base64;
 import android.view.View;
 import android.view.WindowManager;
+import android.webkit.GeolocationPermissions;
 import android.webkit.JavascriptInterface;
 import android.webkit.PermissionRequest;
 import android.webkit.WebChromeClient;
@@ -92,7 +93,7 @@ public class MainActivity extends ComponentActivity {
     immersive();
     WebSettings s = web.getSettings();
     s.setJavaScriptEnabled(true); s.setDomStorageEnabled(true); s.setDatabaseEnabled(true);
-    s.setMediaPlaybackRequiresUserGesture(false); s.setAllowFileAccess(false);
+    s.setMediaPlaybackRequiresUserGesture(false); s.setAllowFileAccess(false); s.setGeolocationEnabled(true);
     final File ttsDir = new File(getCacheDir(), "tts"); ttsDir.mkdirs();
     final WebViewAssetLoader loader = new WebViewAssetLoader.Builder().setDomain(HOST)
         .addPathHandler("/assets/", new WebViewAssetLoader.AssetsPathHandler(this))
@@ -105,10 +106,16 @@ public class MainActivity extends ComponentActivity {
     });
     web.setWebChromeClient(new WebChromeClient() {
       @Override public void onPermissionRequest(PermissionRequest r) { main.post(() -> r.grant(r.getResources())); }
+      // weather location: use the real Android permission; ask with the system dialog if it hasn't been answered yet
+      @Override public void onGeolocationPermissionsShowPrompt(String origin, GeolocationPermissions.Callback cb) {
+        if (hasLocation()) { cb.invoke(origin, true, false); return; }
+        geoPending.add(() -> cb.invoke(origin, hasLocation(), false));
+        requestPermissions(new String[]{Manifest.permission.ACCESS_COARSE_LOCATION, Manifest.permission.ACCESS_FINE_LOCATION}, 2);
+      }
     });
     web.addJavascriptInterface(new Bridge(), "GibsonNative");
     List<String> need = new ArrayList<>();
-    for (String p : new String[]{Manifest.permission.RECORD_AUDIO, Manifest.permission.CAMERA})
+    for (String p : new String[]{Manifest.permission.RECORD_AUDIO, Manifest.permission.CAMERA, Manifest.permission.ACCESS_COARSE_LOCATION, Manifest.permission.ACCESS_FINE_LOCATION})
       if (ContextCompat.checkSelfPermission(this, p) != PackageManager.PERMISSION_GRANTED) need.add(p);
     if (!need.isEmpty()) requestPermissions(need.toArray(new String[0]), 1);
     web.loadUrl("https://" + HOST + "/assets/web/index.html");
@@ -117,7 +124,13 @@ public class MainActivity extends ComponentActivity {
     web.setSystemUiVisibility(View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY | View.SYSTEM_UI_FLAG_FULLSCREEN | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION | View.SYSTEM_UI_FLAG_LAYOUT_STABLE);
   }
   @Override public void onWindowFocusChanged(boolean f) { super.onWindowFocusChanged(f); if (f) immersive(); }
-  @Override public void onRequestPermissionsResult(int c, String[] p, int[] g) { super.onRequestPermissionsResult(c, p, g); emit("perm", new JSONObject()); }
+  final List<Runnable> geoPending = new ArrayList<>();
+  boolean hasLocation() { return ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED || ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED; }
+  @Override public void onRequestPermissionsResult(int c, String[] p, int[] g) {
+    super.onRequestPermissionsResult(c, p, g);
+    for (Runnable r : new ArrayList<>(geoPending)) r.run(); geoPending.clear();
+    emit("perm", J("location", hasLocation()));
+  }
   @Override protected void onPause() { super.onPause(); srWanted = false; if (sr != null) sr.cancel(); unmute(); }
   @Override protected void onDestroy() { super.onDestroy(); if (phone != null) phone.shutdown(); if (sr != null) sr.destroy(); unmute(); if (tts != null) tts.release(); }
   @Override public void onBackPressed() { web.evaluateJavascript("window.__nativeBack && window.__nativeBack()", null); }
@@ -383,7 +396,7 @@ public class MainActivity extends ComponentActivity {
 
   // ------------------------------------------------------------------ JS bridge
   class Bridge {
-    @JavascriptInterface public String info() { return J("app", "1.0.2", "cores", Runtime.getRuntime().availableProcessors(), "model", "kokoro-int8-multi-lang-v1_0").toString(); }
+    @JavascriptInterface public String info() { return J("app", "1.0.3", "cores", Runtime.getRuntime().availableProcessors(), "model", "kokoro-int8-multi-lang-v1_0").toString(); }
     @JavascriptInterface public void ttsInit() { ttsExec.execute(MainActivity.this::ttsLoad); }
     @JavascriptInterface public void tts(int id, String text, int sid, float speed) { ttsExec.execute(() -> { if (tts == null) ttsLoad(); ttsGen(id, text, sid, speed); }); }
     @JavascriptInterface public void srStart(String lang, boolean continuous, boolean quiet) {
