@@ -137,7 +137,7 @@ public class MainActivity extends ComponentActivity {
   @Override public void onRequestPermissionsResult(int c, String[] p, int[] g) {
     super.onRequestPermissionsResult(c, p, g);
     for (Runnable r : new ArrayList<>(geoPending)) r.run(); geoPending.clear();
-    emit("perm", J("location", hasLocation()));
+    emit("perm", J("location", hasLocation(), "mic", ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED));
   }
   @Override protected void onPause() { super.onPause(); srWanted = false; if (sr != null) sr.cancel(); unmute(); }
   @Override protected void onDestroy() { super.onDestroy(); if (phone != null) phone.shutdown(); if (sr != null) sr.destroy(); unmute(); if (tts != null) tts.release(); }
@@ -308,13 +308,13 @@ public class MainActivity extends ComponentActivity {
     f.addListener(() -> {
       try {
         camProvider = f.get();
-        bind(false, false);
+        bind(false, false); camStartedAt = System.currentTimeMillis();
         camErr = ""; emit("cam", J("on", true));
         if (pendingLabel != null) { Runnable r = pendingLabel; pendingLabel = null; r.run(); }
       } catch (Exception e) { camProvider = null; camErr = String.valueOf(e); emit("cam", J("error", camErr)); }
     }, ContextCompat.getMainExecutor(this));
   }
-  Camera camera; boolean camBack, camHi; Runnable pendingLabel;
+  Camera camera; boolean camBack, camHi; Runnable pendingLabel; volatile long camStartedAt;
   void bind(boolean back, boolean hi) throws Exception {
     int disp = getWindowManager().getDefaultDisplay().getRotation(); boolean portrait = disp == android.view.Surface.ROTATION_0 || disp == android.view.Surface.ROTATION_180;
     android.util.Size sz = hi ? (portrait ? new android.util.Size(1080, 1920) : new android.util.Size(1920, 1080)) : new android.util.Size(640, 480);
@@ -339,24 +339,24 @@ public class MainActivity extends ComponentActivity {
   // ------------------------------------------------------------------ label reading: coached burst, sharpest readable frame
   static final double SHARP_OK = 120;
   TextRecognizer textRec; volatile boolean labelOn, labelOcrBusy; int labelId, labelFrames, labelBestChars, labelGood; long labelT0, labelMax, labelLastFrame, labelLastFocus;
-  boolean labelWasOn; Bitmap labelBest; Rect labelBestBox; String labelBestText = ""; double labelBestScore = -1, labelBestSharp, labelMaxSharp;
+  boolean labelWasOn; volatile String labelWhy = ""; Bitmap labelBest; Rect labelBestBox; String labelBestText = ""; double labelBestScore = -1, labelBestSharp, labelMaxSharp;
   void labelStart(int id, boolean back, int maxMs) {
     if (labelOn) labelFinish();
     if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) { emit("labeldone", J("id", id, "error", "camera permission not granted")); return; }
     if (textRec == null) textRec = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS);
     labelId = id; labelMax = maxMs; labelFrames = 0; labelBestChars = 0; labelGood = 0; labelBest = null; labelBestBox = null; labelBestText = ""; labelBestScore = -1; labelBestSharp = 0; labelMaxSharp = 0;
-    labelWasOn = camProvider != null;
+    labelWasOn = camProvider != null; labelWhy = "";
     Runnable go = () -> {
       try { bind(back, true); } catch (Exception e) { emit("labeldone", J("id", id, "error", "camera: " + e)); return; }
       labelT0 = System.currentTimeMillis(); labelLastFrame = 0; labelLastFocus = 0; labelOn = true;
       main.postDelayed(this::focusCenter, 300);
-      main.postDelayed(() -> { if (labelOn && labelId == id) labelFinish(); }, maxMs + 400);
+      main.postDelayed(() -> { if (labelOn && labelId == id) { labelWhy = "timeout"; labelFinish(); } }, maxMs + 400);
     };
     if (camProvider == null) { pendingLabel = go; camStart(); } else go.run();
   }
   void analyzeLabel(ImageProxy img) {
     long now = System.currentTimeMillis();
-    if (now - labelT0 > labelMax) { main.post(() -> { if (labelOn) labelFinish(); }); return; }
+    if (now - labelT0 > labelMax) { labelWhy = "timeout"; main.post(() -> { if (labelOn) labelFinish(); }); return; }
     if (labelOcrBusy || now - labelLastFrame < 280) return;
     labelLastFrame = now; labelFrames++;
     if (now - labelLastFocus > 2000) { labelLastFocus = now; main.post(this::focusCenter); }
@@ -368,6 +368,8 @@ public class MainActivity extends ComponentActivity {
     Bitmap cen = Bitmap.createScaledBitmap(Bitmap.createBitmap(up, (W - cw) / 2, (H - ch) / 2, cw, ch), Math.max(3, (int) (cw * sc)), Math.max(3, (int) (ch * sc)), true);
     int[] px = new int[cen.getWidth() * cen.getHeight()]; cen.getPixels(px, 0, cen.getWidth(), 0, 0, cen.getWidth(), cen.getHeight());
     final double sharp = Sharp.laplacianVariance(px, cen.getWidth(), cen.getHeight());
+    long lsum = 0; for (int i = 0; i < px.length; i += 7) { int c = px[i]; lsum += (((c >> 16) & 255) * 3 + ((c >> 8) & 255) * 6 + (c & 255)) / 10; }
+    final double lum = lsum / Math.max(1.0, px.length / 7.0);
     labelMaxSharp = Math.max(labelMaxSharp, sharp);
     labelOcrBusy = true; final int id = labelId;
     textRec.process(InputImage.fromBitmap(up, 0)).addOnSuccessListener(t -> {
@@ -381,18 +383,21 @@ public class MainActivity extends ComponentActivity {
       }
       java.util.Collections.sort(hs); double textH = hs.isEmpty() ? 0 : hs.get(hs.size() / 2) / (double) H;
       boolean edge = box != null && (box.left < W * .03 || box.right > W * .97);
-      String hint;
-      if (chars < 8) hint = sharp < SHARP_OK * .5 && labelFrames > 3 ? "still" : "show";
-      else if (textH < .018) hint = "closer";
-      else if (sharp < SHARP_OK && textH > .05) hint = "back";
+      String hint;   // coach: light -> no text (blurry = too close to focus, so "back") -> text size -> blur -> framing
+      boolean readable = sharp >= SHARP_OK && chars >= 25 && textH >= .02 && !edge;
+      if (lum < 38) hint = "light";
+      else if (chars < 8) hint = labelFrames > 2 && sharp < SHARP_OK * .6 ? "back" : "show";
+      else if (textH < .02) hint = sharp < SHARP_OK * .6 ? "still" : "closer";
+      else if (sharp < SHARP_OK && textH > .045) hint = "back";
       else if (sharp < SHARP_OK) hint = "still";
       else if (edge) hint = "turn";
+      else if (!readable) hint = "closer";
       else hint = "good";
       double score = chars * Math.min(1.0, sharp / SHARP_OK) * (edge ? .85 : 1);
       if (score > labelBestScore) { labelBestScore = score; labelBest = up; labelBestBox = box; labelBestText = t.getText(); labelBestSharp = sharp; labelBestChars = chars; }
-      if ("good".equals(hint)) labelGood++;
-      emit("label", J("id", id, "hint", hint, "sharp", Math.round(sharp), "chars", chars, "frames", labelFrames, "textH", Math.round(textH * 1000) / 1000.0));
-      if ((sharp >= SHARP_OK && chars >= 40 && !edge) || labelGood >= 2) labelFinish();   // sharp + readable: stop early
+      if ("good".equals(hint)) labelGood++; else labelGood = 0;
+      emit("label", J("id", id, "hint", hint, "sharp", Math.round(sharp), "chars", chars, "frames", labelFrames, "textH", Math.round(textH * 1000) / 1000.0, "lum", Math.round(lum)));
+      if (labelGood >= 2 || (readable && sharp >= SHARP_OK * 1.5 && chars >= 40)) { labelWhy = "readable"; labelFinish(); }   // clearly readable: stop
     }).addOnFailureListener(e -> {
       if (sharp > labelBestSharp && labelBestChars == 0) { labelBest = up; labelBestSharp = sharp; labelBestScore = 0; }
     }).addOnCompleteListener(x -> labelOcrBusy = false);
@@ -403,7 +408,7 @@ public class MainActivity extends ComponentActivity {
     final String text = labelBestText; final int frames = labelFrames, chars = labelBestChars; final double sharp = labelBestSharp; final boolean back = camBack;
     labelBest = null;
     camExec.execute(() -> {
-      JSONObject o = J("id", id, "frames", frames, "chars", chars, "sharp", Math.round(sharp), "maxSharp", Math.round(labelMaxSharp), "camera", back ? "back" : "front", "text", text);
+      JSONObject o = J("id", id, "frames", frames, "chars", chars, "sharp", Math.round(sharp), "maxSharp", Math.round(labelMaxSharp), "camera", back ? "back" : "front", "text", text, "why", labelWhy.isEmpty() ? "stopped" : labelWhy);
       try {
         if (best != null) {
           Bitmap c = best;
@@ -437,6 +442,7 @@ public class MainActivity extends ComponentActivity {
       if (camHi) return;   // (label mode just ended; the low-res rebind is on its way)
       final int rot = img.getImageInfo().getRotationDegrees();
       long now = System.currentTimeMillis();
+      if (now - camStartedAt < 700 && snapWanted > 0) return;   // just switched on: give auto-exposure a moment (first frames are dark)
       boolean wantJpeg = snapWanted > 0 || now - lastJpegAt > 300;
       boolean wantFace = faceOn && !faceBusy && now - lastFaceSent >= 90;
       if (!wantJpeg && !wantFace) return;
@@ -513,7 +519,7 @@ public class MainActivity extends ComponentActivity {
 
   // ------------------------------------------------------------------ JS bridge
   class Bridge {
-    @JavascriptInterface public String info() { return J("app", "1.0.5", "cores", Runtime.getRuntime().availableProcessors(), "model", "kokoro-int8-multi-lang-v1_0").toString(); }
+    @JavascriptInterface public String info() { return J("app", "1.0.6", "cores", Runtime.getRuntime().availableProcessors(), "model", "kokoro-int8-multi-lang-v1_0").toString(); }
     @JavascriptInterface public void ttsInit() { ttsExec.execute(MainActivity.this::ttsLoad); }
     @JavascriptInterface public void tts(int id, String text, int sid, float speed) { ttsExec.execute(() -> { if (tts == null) ttsLoad(); ttsGen(id, text, sid, speed); }); }
     @JavascriptInterface public void srStart(String lang, boolean continuous, boolean quiet) {

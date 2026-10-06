@@ -48,6 +48,8 @@ body.awake .iconbtn{opacity:.75}
 .row>input{flex:1;min-width:160px}
 #convoGlow{position:fixed;inset:0;pointer-events:none;z-index:5;opacity:0;transition:opacity .6s;box-shadow:inset 0 0 22px 2px rgba(255,30,10,.22)}
 body.convo #convoGlow{opacity:.55}
+body.warming #convoGlow{animation:warmup 2.6s ease-in-out infinite}
+@keyframes warmup{0%,100%{opacity:.08}50%{opacity:.4}}
 body.convo[data-busy=listening] #convoGlow{opacity:1}
 #status{font:12px ui-monospace,Menlo,monospace;color:#ff9a8a;white-space:pre-wrap;background:#140101;border-radius:6px;padding:8px;min-height:2.4em}
 </style>
@@ -102,7 +104,7 @@ if ('serviceWorker' in navigator && location.protocol !== 'file:' && !window.Gib
     <button id="testVoice" class="go">Test voice</button>
     <pre id="engInfo" style="white-space:pre-wrap;font-size:11px;opacity:.75;margin:6px 0 0"></pre>
     <pre id="timing" style="white-space:pre-wrap;font-size:11px;opacity:.85;margin:6px 0 0">Last turn: (talk to Gibson once to see timings)</pre>
-    <small id="nNote">Voices download once (use Wi-Fi: Piper 63 MB, Kokoro 92-326 MB), then work offline. Kokoro is pre-warmed at start so the first reply doesn't stutter. Until they're ready, Gibson uses the phone voice.</small></div>
+    <small id="nNote">Voices download once (use Wi-Fi: Piper 63 MB, Kokoro 92-326 MB), then work offline. Kokoro is pre-warmed at start so the first reply doesn't stutter. Until they're ready, Gibson uses the phone voice (in the Android app he waits for his own voice instead and never uses the phone voice).</small></div>
    <div class="card"><h3><span>Phone voice (fallback)</span></h3>
     <label>Voice <select id="voice"></select></label>
     <label>Pitch <span id="pitchV"></span><input type="range" id="pitch" min="0.5" max="1.8" step="0.05"></label>
@@ -116,7 +118,7 @@ if ('serviceWorker' in navigator && location.protocol !== 'file:' && !window.Gib
    <div class="card native-only"><h3><span>Phone app</span></h3>
     <label class="chk"><input type="checkbox" id="quietMic"> Quiet listening (mute the phone's mic beeps)</label>
     <label class="chk"><input type="checkbox" id="labelBack"> Use back camera for reading labels (sharper, autofocus; turn the phone around while he reads)</label>
-    <label class="chk"><input type="checkbox" id="faceTrack"> Face tracking (Gibson's eyes follow you; uses the front camera)</label>
+    <label class="chk"><input type="checkbox" id="faceTrack"> Face tracking (Gibson's eyes follow you; keeps the front camera on, which heats the phone and slows charging. Off by default)</label>
     <small>Ask “what do you see?” or “what am I holding?” and Gibson looks through the camera (needs a Gemini key).</small>
     <pre id="natDiag" style="white-space:pre-wrap;font-size:11px;opacity:.75;margin:6px 0 0"></pre></div>
    <div class="card"><h3><span>Conversation mode</span></h3>

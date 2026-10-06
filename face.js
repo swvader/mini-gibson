@@ -835,22 +835,29 @@ addEventListener('pointerdown', e => {   // tap the top-left corner to toggle th
 });
 
 // ---------------------------------------------------------------- main loop
-let last = performance.now(), fpsAcc = 0, fpsN = 0, FPS_CAP = 0, lastDraw = 0, blurTick = 0;
+let last = performance.now(), fpsAcc = 0, fpsN = 0, FPS_CAP = 0, IDLE_CAP = 0, MAX_FPS = 0, lastDraw = 0, blurTick = 0, capAcc = 0;
+function calmCap() {
+  if (!IDLE_CAP || !S.idleOn || S.demo || S.trans || S.talk || S.mouth.k > .02 || S.glitch.amt > 0 || S.P['fx.think'] > .01 || S.P['fx.listen'] > .01 || S.listenLevel > .02) return 0;
+  const moving = S.blinkVal > 0 || S.t - S.blinkStart < S.blinkDur + .08 || Math.abs(S.gx - (S.rgx || 0)) > .01 || Math.abs(S.gy - (S.rgy || 0)) > .01;
+  return moving ? IDLE_CAP : Math.max(8, Math.round(IDLE_CAP * .55));
+}
 function frame(now) {
   requestAnimationFrame(frame);
   if (S.manual) return;
-  if (FPS_CAP && now - lastDraw < 1000 / FPS_CAP - 4) return;
-  lastDraw = now;
   const dt = Math.min(.05, Math.max(0, (now - last) / 1000)); last = now;
-  update(dt); render();
-  fpsAcc += dt; fpsN++;
-  if (fpsAcc > .5) { S.fps = fpsN / fpsAcc; fpsAcc = 0; fpsN = 0; autoQuality(); if (dbgBuilt && !dbg.hidden) { const f = dbg.querySelector('#fps'); if (f) f.textContent = S.fps.toFixed(0) + ' fps'; syncBtns(); } }
+  update(dt);
+  const cap = FPS_CAP || calmCap() || MAX_FPS;
+  if (cap && now - lastDraw < 1000 / cap - 4) return;
+  const fdt = Math.min(.25, Math.max(0, (now - lastDraw) / 1000)); lastDraw = now;
+  render(); S.rgx = S.gx; S.rgy = S.gy;
+  fpsAcc += fdt; fpsN++; capAcc += cap || 60;
+  if (fpsAcc > .5) { const want = capAcc / fpsN; S.fps = fpsN / fpsAcc; fpsAcc = 0; fpsN = 0; capAcc = 0; autoQuality(want); if (dbgBuilt && !dbg.hidden) { const f = dbg.querySelector('#fps'); if (f) f.textContent = S.fps.toFixed(0) + ' fps'; syncBtns(); } }
 }
 document.addEventListener('visibilitychange', () => { last = performance.now(); slowN = 0; });
 let slowN = 0;
-function autoQuality() {   // if the device can't hold ~60 fps, render fewer pixels (glow hides the softness)
+function autoQuality(want) {   // if the device can't hold ~60 fps, render fewer pixels (glow hides the softness)
   if (!CFG.autoQuality || document.hidden || S.t < 3) return;
-  slowN = S.fps < (FPS_CAP ? FPS_CAP * .8 : 48) ? slowN + 1 : 0;   // while capped, 'slow' means below the cap
+  slowN = S.fps < Math.min(48, (want || 60) * .8) ? slowN + 1 : 0;   // while capped, 'slow' means below the cap
   if (slowN >= 4 && CFG.renderScale > .55) { CFG.renderScale = Math.round((CFG.renderScale - .15) * 100) / 100; slowN = 0; W = H = 0; resize(); emit({ event: 'quality', renderScale: CFG.renderScale }); }
 }
 
@@ -860,7 +867,8 @@ const API = {
   mouthText: (text, ms) => speak(text, { silent: true, durationMs: ms }),
   setListenLevel: v => { S.listenLevel = Math.max(S.listenLevel, clamp(+v || 0, 0, 1)); },
   config, receive, debug: toggleDebug,
-  setFpsCap: n => { FPS_CAP = Math.max(0, +n || 0); fpsAcc = 0; fpsN = 0; },
+  setFpsCap: n => { FPS_CAP = Math.max(0, +n || 0); fpsAcc = 0; fpsN = 0; capAcc = 0; },
+  setIdleCap: n => { IDLE_CAP = Math.max(0, +n || 0); }, setMaxFps: n => { MAX_FPS = Math.max(0, +n || 0); },
   get expressions() { return Object.keys(EXPRESSIONS); }, get tour() { return TOUR.slice(); }, get labels() { return Object.assign({}, LABELS); },
   get themes() { return Object.keys(THEMES); },
   get state() { return { expression: S.base, thinking: S.thinkOn, listening: S.listenOn, idle: S.idleOn, speaking: !!S.talk || S.mouth.k > .05, demo: !!S.demo, fps: Math.round(S.fps), caption: S.caption, t: S.t }; },

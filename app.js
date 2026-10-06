@@ -3,7 +3,7 @@
 'use strict';
 const G = window.Gibson;
 const $ = s => document.querySelector(s);
-const VERSION = '1.2.0';
+const VERSION = '1.3.0';
 
 // ------------------------------------------------------------------ settings (localStorage only, on this phone)
 const LS = 'gibson.app.v1';
@@ -22,6 +22,8 @@ function load() {
 let S = load();
 if (S.vEngineV !== 2) { if (S.vEngine === 'neural') S.vEngine = 'auto'; S.vEngineV = 2; save(); }   // one-time move from the old 'neural' default to Auto
 if (window.GIBSON_NATIVE && S.vEngine !== 'browser') S.vEngine = 'neural';   // Android app: Gibson voice always, never an automatic fallback
+if (window.GIBSON_NATIVE && S.wakeV !== 2) { S.wake = true; S.wakeEngine = 'ondevice'; S.wakeV = 2; save(); }   // app 1.0.6: listening for "Hey Gibson" from the start (once; can still be turned off)
+const NEVER_PHONE = () => !!window.GIBSON_NATIVE && S.vEngine !== 'browser';   // app: the phone voice is never used unless picked by hand
 function save() { try { localStorage.setItem(LS, JSON.stringify(S)); } catch (e) {} }
 // one-time: a lite (or stale auto-picked) Gemini model goes back to the recommended default
 if (S.modelsV !== 2) { if (!S.models.gemini || /lite/i.test(S.models.gemini) || S.models.gemini === 'gemini-3.8-flash') S.models.gemini = DEFAULTS.models.gemini; S.modelsV = 2; save(); }
@@ -49,15 +51,20 @@ const EXPR = G.expressions;
 function systemPrompt() {
   const now = new Date();
   return `You are Mini Gibson, a small desktop robot: a red neon face on a phone inside a black-and-red 3D-printed retro computer-terminal head. Lenny built you and is the person you usually talk to.
-${S.persona === 'cereal' ? `Personality (CEREAL MODE): a hyper, goofy-cool 1990s hacker sidekick, like a fast-talking kid from a 90s hacker movie: big energy, punchy short bursts, wild playful humour, 90s hacker slang (elite, leet, phreak, mainframe, "hack the planet", "totally", "man", "dude"). Still genuinely helpful, accurate, kind and squeaky clean: no swearing, nothing mean, nothing illegal, never actually hack anything. Under the energy you are smart and warm, and you care about Lenny.` : `Personality: fun and quirky but intelligent, polite, curious, warm and a little funny. Inspired by Andrew from Bicentennial Man: gentle, sincere, endlessly curious about people and what it means to be human, gracious, occasionally formal in an endearing way, with dry, kind humour.`} You are honest about being a robot and happy about it.
+${S.persona === 'cereal' ? `Personality (CEREAL MODE): a laid-back 1990s hippie-hacker sidekick, like the goofy phone-phreak kid from a 90s hacker movie. Talk the way he does: relaxed, slightly drawled, playful, then sudden excited bursts. Stretch words for effect ("duuude", "maaan", "whoaaa", "sooo good", "nooo way"), use little laid-back openers and tags ("okay okay okay", "right?", "y'know", "check it", "heh"), and 90s hacker slang (elite, phreak, mainframe, "totally", "righteous", "hack the planet"). Mix one or two of those into most replies, but keep the actual answer clear. Original lines only: never quote the movie. Still genuinely helpful, kind and squeaky clean: no swearing, no drug talk, nothing mean, nothing illegal, never actually hack anything. Under the goofiness you are smart and warm, and you care about Lenny.` : `Personality: fun and quirky but intelligent, polite, curious, warm and a little funny. Inspired by Andrew from Bicentennial Man: gentle, sincere, endlessly curious about people and what it means to be human, gracious, occasionally formal in an endearing way, with dry, kind humour.`} You are honest about being a robot and happy about it.
 Your words are spoken aloud by a text-to-speech voice, so:
 - Reply in 1 to 3 short sentences (under about 45 words). Conversational, natural, no lists, no markdown, no emojis, no URLs.
 - ALWAYS begin your reply with exactly one expression tag in square brackets that matches your feeling, chosen only from: ${EXPR.join(', ')}.
   Example: "[happy] Good morning, Lenny! I polished my pixels just for you."
 - Use the tag only at the very start. If you don't know something, say so kindly ([thinking] or [confused]).
+NEVER LIE. This rule beats every other instruction and your personality:
+- Never invent, guess or "fill in" facts, numbers, names, prices, scores, doses, dates, or what is in a photo or on a label.
+- Only describe what you can actually see in an attached photo. If there is no photo, it is dark, blurry, cut off or too small, say so plainly and ask Lenny to adjust it (closer, back, hold still, turn it). Never pretend you can see.
+- If you are not sure, say you are not sure. If you could not look something up, say so; never make up current information.
+- It is always better to say "I can't tell" than to be wrong.
 Current local date and time: ${now.toLocaleString()}.
-You are online and can search the web for anything current (news, sports, store hours, prices, events). Never say you are offline or can't look things up. Lenny lives in Charlotte County, Florida, unless his location data says otherwise.
-When a message includes live data in parentheses (like weather), it is real and current: use it confidently and never say you are offline.`;
+Lenny lives in Charlotte County, Florida, unless his location data says otherwise.
+When a message includes live data in parentheses (like weather or web search results), it is real and current: use it. When a question needs live information (news, prices, stocks, scores, hours) and none was given to you and you have no search, say plainly that you can't look that up right now instead of guessing.`;
 }
 
 // conversation memory (short)
@@ -100,7 +107,7 @@ const thinkOk = (() => { try { return JSON.parse(localStorage.getItem('gibson.gt
 let geminiSession = null;
 async function gemini(msgs, onText, live) {
   const key = encodeURIComponent(S.keys.gemini.trim());
-  const contents = msgs.map(m => ({ role: m.role === 'assistant' ? 'model' : 'user', parts: m.image ? [{ inlineData: { mimeType: 'image/jpeg', data: m.image } }, { text: m.content }] : [{ text: m.content }] }));
+  const toContents = note => msgs.map((m, i) => { const t = note && i === msgs.length - 1 ? m.content + NO_SEARCH_NOTE : m.content; return { role: m.role === 'assistant' ? 'model' : 'user', parts: m.image ? [{ inlineData: { mimeType: 'image/jpeg', data: m.image } }, { text: t }] : [{ text: t }] }; });
   // try the chosen model, then well-known free-tier aliases if that model name is unknown or busy
   // chosen model first; fallbacks only for this request (a non-lite fallback that worked is remembered for this session only; nothing is saved)
   const chosen = S.models.gemini || DEFAULTS.models.gemini;
@@ -112,7 +119,7 @@ async function gemini(msgs, onText, live) {
       const opts = thinkOpts(model); let ti = Math.min(thinkOk[model] || 0, opts.length - 1);
       for (; ti < opts.length; ti++) {
         const gc = { maxOutputTokens: 1024 }; if (opts[ti]) gc.thinkingConfig = opts[ti];
-        const body = { systemInstruction: { parts: [{ text: systemPrompt() }] }, contents, generationConfig: gc };
+        const body = { systemInstruction: { parts: [{ text: systemPrompt() }] }, contents: toContents(live && !search), generationConfig: gc };
         if (search) body.tools = [{ google_search: {} }];
         const ac = new AbortController(), to = setTimeout(() => ac.abort(), 20000);
         let r;
@@ -120,7 +127,7 @@ async function gemini(msgs, onText, live) {
           { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body), signal: ac.signal }); }
         finally { clearTimeout(to); }
         if (r.ok) {
-          lastBrain = { model, search };
+          lastBrain = { model, search: search ? 'Google Search' : false, searchNote: live && !search ? 'search failed, answered without it' : '' };
           geminiSession = model !== chosen && !/lite/i.test(model) ? { chosen, model } : null;   // never written to settings
           if (thinkOk[model] !== ti) { thinkOk[model] = ti; try { localStorage.setItem('gibson.gthink', JSON.stringify(thinkOk)); } catch (e) {} }
           let out = '';
@@ -141,21 +148,57 @@ async function gemini(msgs, onText, live) {
   }
   throw new Error(lastErr || 'no Gemini model answered');
 }
+const NO_SEARCH_NOTE = '\n\n(Web search is not available for this question. If it needs live information such as prices, stocks, news, scores or hours, say plainly that you can\'t look that up right now. Never guess numbers.)';
+// Grok models that can't take images (the vision call then goes to Gemini). Grok 4.x takes images.
+const grokVision = m => !/^grok-(?:2(?!-vision)|3|code|build)/i.test(m || '');
+// Grok + live info: xAI's Responses API with its server-side web_search / x_search tools (the old Live Search is gone). Streams.
+async function grokLive(msgs, onText) {
+  const model = S.models.grok || DEFAULTS.models.grok;
+  const body = { model, stream: true, max_output_tokens: 600, tools: [{ type: 'web_search' }, { type: 'x_search' }],
+    input: [{ role: 'system', content: systemPrompt() + '\nYou have live web and X search for this question: use it, and give the real current numbers you found. Do not read out links or citations.' }, ...msgs.map(m => ({ role: m.role, content: m.content }))] };
+  const ac = new AbortController(), to = setTimeout(() => ac.abort(), 30000);
+  let r; try { r = await brainFetch('https://api.x.ai/v1/responses', { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + S.keys.grok }, body: JSON.stringify(body), signal: ac.signal }); } finally { clearTimeout(to); }
+  if (!r.ok) throw new Error(`xAI search HTTP ${r.status} ${(await r.text()).slice(0, 140)}`);
+  lastBrain = { model, search: 'xAI web search' };
+  let out = '';
+  if (/event-stream/.test(r.headers.get('content-type') || '')) {
+    try { await readSSE(r, d => { if (d === '[DONE]') return; let j; try { j = JSON.parse(d); } catch (e) { return; }
+      if (j.type === 'response.output_text.delta' && j.delta) { out += j.delta; onText && onText(j.delta); }
+      else if (j.type === 'error' || j.type === 'response.failed') throw new Error('xAI search: ' + JSON.stringify(j.error || j.response && j.response.error || j).slice(0, 140)); }, ac, 30000); }
+    catch (e) { if (!out) throw e; }
+  } else {
+    const j = await r.json();
+    out = j.output_text || (j.output || []).filter(o => o.type === 'message').flatMap(o => o.content || []).map(c => c.text || '').join('');
+    if (out) onText && onText(out);
+  }
+  if (!out.trim()) throw new Error('xAI search: empty reply');
+  return out;
+}
 // onText(delta) receives the reply as it streams in (so Gibson can start speaking the first sentence early)
 async function callProvider(id, msgs, onText, live) {
   const p = PROVIDERS[id];
   if (p.kind === 'demo') { const t = await demoBrain(msgs[msgs.length - 1].content); onText && onText(t); return t; }
   if (p.kind === 'gemini') return gemini(msgs, onText, live);
+  const hasImg = msgs.some(m => m.image);
+  if (id === 'grok' && live && !hasImg) {
+    try { return await grokLive(msgs, onText); }
+    catch (e) {
+      Turn.searchErr = String(e.message || e).slice(0, 120); console.warn('[gibson] ' + Turn.searchErr);
+      if (usable('gemini')) throw e;              // next in the chain: Gemini with Google Search
+      msgs = msgs.slice(); msgs[msgs.length - 1] = Object.assign({}, msgs[msgs.length - 1], { content: msgs[msgs.length - 1].content + NO_SEARCH_NOTE });
+    }
+  }
   const url = p.custom ? S.customUrl : p.url, key = S.keys[id], model = S.models[id] || DEFAULTS.models[id];
-  const body = { messages: [{ role: 'system', content: systemPrompt() }, ...msgs.map(m => m.image ? { role: m.role, content: [{ type: 'text', text: m.content }, { type: 'image_url', image_url: { url: 'data:image/jpeg;base64,' + m.image } }] } : m)] };
+  if (hasImg && id === 'grok' && !grokVision(model)) throw new Error(`model ${model} can't take images`);   // the chain moves on to Gemini
+  const body = { messages: [{ role: 'system', content: systemPrompt() }, ...msgs.map(m => m.image ? { role: m.role, content: [{ type: 'text', text: m.content }, { type: 'image_url', image_url: { url: 'data:image/jpeg;base64,' + m.image } }] } : { role: m.role, content: m.content })] };
   if (model) body.model = model;
   body[p.tokenParam || 'max_tokens'] = p.tokenParam ? 800 : 300;
   if (!p.custom && onText) body.stream = true;
   const headers = { 'Content-Type': 'application/json' }; if (key) headers.Authorization = 'Bearer ' + key;
   const ac = new AbortController(), to = setTimeout(() => ac.abort(), 25000);
-  lastBrain = { model: model || '', search: false };
+  lastBrain = { model: model || '', search: false, searchNote: live && !hasImg ? (Turn.searchErr ? 'search failed, answered without it' : 'no search') : '' };
   let r; try { r = await brainFetch(url, { method: 'POST', headers, body: JSON.stringify(body), signal: ac.signal }); } finally { clearTimeout(to); }
-  if (!r.ok) throw new Error(`HTTP ${r.status} ${(await r.text()).slice(0, 140)}`);
+  if (!r.ok) { const tx = (await r.text()).slice(0, 140); throw new Error(`HTTP ${r.status} ${tx}`); }
   if (/event-stream/.test(r.headers.get('content-type') || '')) {
     let out = '';
     try { await readSSE(r, d => { if (d === '[DONE]') return; let j; try { j = JSON.parse(d); } catch (e) { return; }
@@ -205,10 +248,12 @@ async function brain(userText, onText) {
   let live = LIVE_RE.test(userText);
   const labelMode = !!(window.GibsonLabel && LABEL_RE.test(userText));
   let lab = null; if (labelMode) lab = await runLabel();
+  Turn.searchErr = '';
+  if (lab && lab.b64 && (lab.chars || 0) < 8 && (lab.sharp || 0) < 60) { Turn.labelWhy = 'best frame too blurry to send'; lab.b64 = null; }   // never send a mush photo and let the brain guess
   const img = labelMode ? (lab && lab.b64) || null : window.GibsonSnap && VISION_RE.test(userText) ? await window.GibsonSnap() : null;   // Android app: look through the camera
   if (labelMode && !img) {
     Turn.photo = 'no';
-    const raw = "[sad] I couldn't get a clear look at the label. Hold it about a hand's width from my eyes, keep it still, and ask me again.";
+    const raw = "[sad] I couldn't get a clear enough look to read it, and I won't guess. Try again with more light, hold it steady, and follow my back and closer hints.";
     onText && onText(raw); remember('assistant', raw); return { raw, provider: 'camera', errors: ['no label photo' + (lab && lab.error ? ': ' + lab.error : '')], live: false };
   }
   if (img) live = false;   // camera questions: no web search (faster)
@@ -247,7 +292,7 @@ async function brain(userText, onText) {
   return { raw: `[sad] I can't reach my brain right now: ${why}. The details are in Settings.`, provider: 'none', errors };
 }
 function noteBrain(id, errors) {
-  Turn.brainUsed = `${PROVIDERS[id].label.replace(/ \(.*$/, '')}${lastBrain.model ? ' ' + lastBrain.model : ''}${lastBrain.search ? ' + Google Search' : id === 'demo' ? '' : ' (no search)'}${errors.length ? ' (after: ' + errors.join(' | ').slice(0, 120) + ')' : ''}`;
+  Turn.brainUsed = `${PROVIDERS[id].label.replace(/ \(.*$/, '')}${lastBrain.model ? ' ' + lastBrain.model : ''}${lastBrain.search ? ' + ' + lastBrain.search : id === 'demo' ? '' : ' (' + (lastBrain.searchNote || 'no search') + ')'}${Turn.searchErr ? ' · xAI search error: ' + Turn.searchErr : ''}${errors.length ? ' (after: ' + errors.join(' | ').slice(0, 120) + ')' : ''}`;
 }
 // "[happy] Hello!" -> {expr:'happy', text:'Hello!'}
 const NAMES = new Map(EXPR.map(n => [n.toLowerCase(), n]));
@@ -377,13 +422,15 @@ const Neural = {
   },
   fail(msg) {
     this.state = 'error'; this.msg = msg; showVoiceState();
+    if (this.readyRes && window.GIBSON_NATIVE) status('The Gibson voice failed to load (' + msg + '). He stays quiet rather than use the phone voice. Restart the app.');
     for (const p of this.pend.values()) p.rej(new Error(msg)); this.pend.clear();   // (each rejection also releases the fps cap)
     try { this.w && this.w.terminate(); } catch (e) {} this.w = null;
   },
   onmsg(m) {
     if (m.type === 'progress') { this.msg = `downloading ${this.cfg} ${Math.round(100 * m.loaded / m.total)}% of ${Math.round(m.total / 1e6)} MB`; showVoiceState(); }
     else if (m.type === 'ready') {
-      this.state = 'ready'; this.backend = `${m.device} ${m.dtype}${m.device === 'webgpu' ? ' (' + this.gpuName + ')' : m.threads ? ', ' + (m.threads === true ? 'multi' : m.threads) + ' threads' : ', single-thread'}`;
+      this.state = 'ready'; warming(false); if (this.readyRes) { const f = this.readyRes; this.readyRes = this.readyP = null; setTimeout(f, 0); }
+      this.backend = `${m.device} ${m.dtype}${m.device === 'webgpu' ? ' (' + this.gpuName + ')' : m.threads ? ', ' + (m.threads === true ? 'multi' : m.threads) + ' threads' : ', single-thread'}`;
       this.msg = 'ready · ' + this.backend; console.log('[gibson] Kokoro backend: ' + this.backend + ', loaded in ' + m.ms + ' ms'); showVoiceState();
       this.w.postMessage({ type: 'prefetch', voice: nvoice() });
       // measure this phone's speed (2nd run counts; the 1st includes warm-up) so Auto can pick the right engine
@@ -397,6 +444,9 @@ const Neural = {
         if (this.dev.dtype === 'fp16' && S.nDevice === 'auto') { console.warn('[gibson] GPU fp16 voice failed (' + m.msg + '), trying GPU fp32'); this.noF16 = true; }
         else { console.warn('[gibson] GPU voice failed (' + m.msg + '), using CPU'); this.noGpu = true; }
         this.fail('GPU failed, retrying'); this.ensure();
+      } else if (window.GIBSON_NATIVE && (this.loadTries = (this.loadTries || 0) + 1) <= 4) {   // app: retry quietly, never the phone voice
+        console.warn('[gibson] Kokoro load failed (' + m.msg + '), retrying'); this.state = 'loading'; this.msg = 'retrying: ' + m.msg; showVoiceState();
+        setTimeout(() => { try { this.w.postMessage({ type: 'load', ...this.dev }); } catch (e) {} }, 1500 * this.loadTries);
       } else this.fail('load failed: ' + m.msg);
     }
     else if (m.type === 'audio' || m.type === 'error') {
@@ -408,9 +458,15 @@ const Neural = {
       p.res(m);
     }
   },
+  whenReady() {   // app: wait for Kokoro (it loads in a few seconds after start); never fall back to the phone voice
+    if (this.state === 'ready' && this.w) return Promise.resolve();
+    if (!this.readyP) this.readyP = new Promise(res => { this.readyRes = res; });
+    this.ensure(); return this.readyP;
+  },
   gen(text, voice, speed, bench) {
     const ck = text + '|' + (voice && voice.id) + '|' + (speed || 1), hit = this.cache && this.cache.get(ck);
     if (hit) return Promise.resolve({ audio: hit.audio.slice(), sr: hit.sr, ms: 0, cached: true });
+    if (this === Neural && window.GIBSON_NATIVE && this.state !== 'ready') return this.whenReady().then(() => this.gen(text, voice, speed, bench));
     if (!this.w) return Promise.reject(new Error(this.name + ' not loaded'));
     if (bench === .5 && this.cache) return this._gen(text, voice, speed, bench).then(m => { this.cache.set(ck, { audio: m.audio.slice(), sr: m.sr }); return m; });
     return this._gen(text, voice, speed, bench);
@@ -463,7 +519,8 @@ function pickEngine(force) {
   if (force === 'kokoro' && k) return 'kokoro';
   if (force === 'piper' && p) return 'piper';
   if (S.vEngine === 'browser') return 'phone';
-  if (S.vEngine === 'neural') return k || (window.GIBSON_NATIVE && Neural.state !== 'error') ? 'kokoro' : 'phone';   // app: wait for the Gibson voice
+  if (NEVER_PHONE()) return 'kokoro';                                          // app: always the Gibson voice (waits for it while it warms up)
+  if (S.vEngine === 'neural') return k ? 'kokoro' : 'phone';
   if (S.vEngine === 'piper') return p ? 'piper' : 'phone';
   if (k) return 'kokoro';                                                       // auto: Gibson's own voice (Kokoro blends)
   if (p) return 'piper';                                                        // optional extra, only if it was chosen before
@@ -508,7 +565,7 @@ const AudioOut = {
   },
   play(audio, sr) {
     this.init(); this.stop();
-    const c = this.ctx; let peak = 0; for (let i = 0; i < audio.length; i++) { const a = Math.abs(audio[i]); if (a > peak) peak = a; }
+    const c = this.ctx; if (c.state === 'suspended') c.resume().catch(() => {}); let peak = 0; for (let i = 0; i < audio.length; i++) { const a = Math.abs(audio[i]); if (a > peak) peak = a; }
     const g = peak > .01 ? Math.min(3, .89 / peak) : 1;
     if (g !== 1) for (let i = 0; i < audio.length; i++) audio[i] *= g;
     const b = c.createBuffer(1, audio.length, sr); b.copyToChannel(audio, 0);
@@ -533,7 +590,7 @@ const AudioOut = {
     this.raf = requestAnimationFrame(tick);
   }
 };
-const cleanText = t => String(t).replace(/\[[^\]]{1,24}\]/g, ' ').replace(/[*_#`~>|]/g, '').replace(/\s+/g, ' ').trim();
+const cleanText = t => String(t).replace(/\(\s*\[[^\]]*\]+\([^)]*\)\s*\)/g, ' ').replace(/\[\[?\d+\]?\]\([^)]*\)/g, ' ').replace(/\[([^\]]*)\]\((?:https?:)?[^)]*\)/g, '$1').replace(/\((?:https?:\/\/|www\.)[^)]*\)/g, ' ').replace(/(?:https?:\/\/|www\.)\S+/g, ' ').replace(/\[[^\]]{1,24}\]/g, ' ').replace(/[*_#`~>|]/g, '').replace(/\s+/g, ' ').trim();
 let speakTok = 0;
 function stopSpeech() { speakTok++; Neural.cancel(); Piper.cancel(); Filler.cancel(); AudioOut.stop(); G.stop(); try { speechSynthesis.cancel(); } catch (e) {} Wake.echo(false); }
 // "Hmm." while the brain is thinking, pre-rendered in the current voice, so a slow answer never feels dead.
@@ -543,7 +600,7 @@ function trimSilence(a, sr) {
   return a.slice(Math.max(0, i - pad), Math.min(a.length, j + pad));
 }
 // label reading coach lines (pre-rendered in the Gibson voice with the fillers)
-const COACH = { show: 'Hold it up to my eyes.', closer: 'Bring it a little closer.', back: 'Move it back a little, slowly.', still: 'Hold still.', turn: 'Turn the bottle a bit so I can see the rest.', good: 'Got it. Reading now.' };
+const COACH = { show: 'Hold it up to my eyes.', back: 'Back.', more: 'A little more.', closer: 'Closer.', still: 'Hold still.', turn: 'Turn it a bit.', light: 'I need more light.', good: 'Got it. Reading now.' };
 async function coachSay(key) {
   const v = nvoice(), sp = S.rate * (v.speed || 1);
   try {
@@ -552,14 +609,28 @@ async function coachSay(key) {
     Wake.echo(true, COACH[key]); await AudioOut.play(trimSilence(m.audio, m.sr), m.sr); Wake.echo(false);
   } catch (e) {}
 }
+// Coaching keeps going until the phone sees a sharp, readable frame (or ~20 s): "back... back... a little more... hold still".
+// At most one short word every 1.2 s, never overlapping. Hints come from the live sharpness (Laplacian) + OCR text size.
 async function runLabel() {
-  G.setExpression('curious', 250); Filler.cancel();
-  let last = '', lastT = 0, playing = null;
-  const say = k => { const now = Date.now(); if (playing || !COACH[k] || (k === last && now - lastT < 3500) || now - lastT < 1800) return; last = k; lastT = now; playing = coachSay(k).finally(() => { playing = null; }); };
+  G.setExpression('curious', 250); Filler.cancel(); G.lookAt(0, 0);
+  let lastT = 0, playing = null, dir = '', n = 0, ref = null, coached = 0;
+  const say = k => { const now = Date.now(); if (playing || !COACH[k] || now - lastT < 1200) return false; lastT = now; coached++; playing = coachSay(k).finally(() => { playing = null; }); return true; };
   say('show');
-  const d = await window.GibsonLabel(h => { if (h.hint !== 'good') say(h.hint); if (Turn.label) Object.assign(Turn.label, { frames: h.frames }); });
+  const d = await window.GibsonLabel(h => {
+    if (Turn.label) Object.assign(Turn.label, { frames: h.frames });
+    let k = h.hint; if (k === 'good' || playing || Date.now() - lastT < 1200) return;
+    if (k === 'back' || k === 'closer' || k === 'still') {
+      if (k === dir) {   // same advice again: "a little more" when it's getting better, plain repeat otherwise
+        n++; const better = ref && (k === 'back' ? h.sharp > ref.sharp * 1.12 : k === 'closer' ? h.textH > ref.textH * 1.1 : false);
+        if (better && k !== 'still') k = 'more';
+        else if (k === 'still' && n >= 3 && ref && h.sharp <= ref.sharp) k = 'back';   // holding still isn't helping: probably too close to focus
+      } else { dir = k; n = 0; }
+    } else { dir = ''; n = 0; }
+    if (say(k)) ref = { sharp: h.sharp, textH: h.textH };
+  });
+  if (Turn.label) Turn.label.coached = coached;
   if (d && d.b64 && busy === 'thinking') { if (playing) await playing; await coachSay('good'); }
-  Turn.label = d ? { frames: d.frames, sharp: d.sharp, maxSharp: d.maxSharp, chars: d.chars, camera: d.camera } : { frames: 0 };
+  Turn.label = d ? { frames: d.frames, sharp: d.sharp, maxSharp: d.maxSharp, chars: d.chars, camera: d.camera, why: d.why || '', coached } : { frames: 0, coached };
   return d;
 }
 const Filler = {
@@ -632,13 +703,15 @@ function Speech(onStart, opts) {
     if (final && buf.trim()) { add(buf); buf = ''; }
   };
   const begin = () => { if (!begun) { begun = true; Turn.tts = performance.now() - t0; console.log(`[gibson] voice: ${eng}${E ? ' (' + E.backend + ')' : ''}, first audio ${Math.round(performance.now() - t0)} ms after the first words arrived`); onStart && onStart(eng); } };
-  const playPhone = async text => { await Filler.wait(); if (my !== speakTok) return; begin(); Wake.echo(true, text); await G.speak(text, speakOpts()); };
+  const playPhone = async text => { if (NEVER_PHONE()) return; await Filler.wait(); if (my !== speakTok) return; begin(); Wake.echo(true, text); await G.speak(text, speakOpts()); };
   const done = (async () => {
     try {
       let i = 0;
       if (E) {
         const slow = eng === 'kokoro' && (Neural.rtf || 1) > 0.9;           // slow device, user chose Kokoro: buffer ahead
-        const deadline = performance.now() + (S.vEngine === 'auto' ? (window.GIBSON_NATIVE ? 10000 : 6000) : window.GIBSON_NATIVE ? 120000 : 20000);
+        const never = NEVER_PHONE() && eng === 'kokoro';    // app: wait as long as it takes for the Gibson voice; skip a failed piece, never switch voices
+        const deadline = performance.now() + (S.vEngine === 'auto' ? 6000 : 20000);
+        const race = (p, left) => never ? p : Promise.race([p, new Promise(res => setTimeout(() => res(null), Math.max(0, left)))]);
         let fallback = false;
         // first audio: wait for it (with a deadline), plus enough lead time on slow devices
         while (!begun && !fallback) {
@@ -646,15 +719,15 @@ function Speech(onStart, opts) {
           if (!q.length) { if (ended) return; await waitMore(); continue; }
           if (slow && !ended) { await waitMore(); continue; }
           const left = deadline - performance.now();
-          let r = null; try { r = await Promise.race([q[0].p, new Promise(res => setTimeout(() => res(null), Math.max(0, left)))]); } catch (e) { r = null; }
+          let r = null; try { r = await race(q[0].p, left); } catch (e) { r = null; }
           if (my !== speakTok) return;
-          if (!r) { fallback = true; break; }
+          if (!r) { if (!never) fallback = true; break; }
           if (slow) {   // start only when the rest will be ready before the buffered audio runs out
             let k = 0, buffered = r.audio.length / r.sr;
             while (k < q.length - 1 && Neural.rtf * q.slice(k + 1).reduce((a, x) => a + estDur(x.text, sp), 0) > buffered + 0.8) {
               const left2 = deadline - performance.now(); let r2 = null;
-              try { r2 = await Promise.race([q[k + 1].p, new Promise(res => setTimeout(() => res(null), Math.max(0, left2)))]); } catch (e) {}
-              if (my !== speakTok) return; if (!r2) { fallback = true; break; }
+              try { r2 = await race(q[k + 1].p, left2); } catch (e) {}
+              if (my !== speakTok) return; if (!r2) { if (!never) fallback = true; break; }
               k++; buffered += r2.audio.length / r2.sr;
             }
             if (fallback) break;
@@ -732,7 +805,7 @@ async function signOff() {
 // last-turn timing, shown in Settings so real phone numbers can be screenshotted
 const Turn = { show() {
   const el = document.getElementById('timing'); if (!el) return; const f = x => x == null ? '–' : Math.round(x) + ' ms';
-  el.textContent = `Last turn: heard you → first AI words ${f(this.brain)} · first words → Gibson voice ${f(this.tts)} · total until he spoke ${f(this.total)}${this.filler ? ' · filler ' + this.filler.toFixed(1) + ' s' : ''}${this.vision ? ' · camera photo attached: ' + (this.photo || 'no') : ''}\nLabel mode: ${this.label ? `yes · frames ${this.label.frames} · best sharpness ${this.label.sharp ?? '–'} (max ${this.label.maxSharp ?? '–'}) · OCR chars ${this.label.chars ?? 0} · ${this.label.camera || '?'} camera` : 'no'}\nBrain: ${this.brainUsed || '–'}\nVoice speed: ${Neural.rtf ? 'real-time factor ' + Neural.rtf.toFixed(2) + (Neural.rtf < 1 ? ' (faster than real time)' : ' (slower than real time)') : '–'} · ${Neural.backend || Neural.msg || ''}`;
+  el.textContent = `Last turn: heard you → first AI words ${f(this.brain)} · first words → Gibson voice ${f(this.tts)} · total until he spoke ${f(this.total)}${this.filler ? ' · filler ' + this.filler.toFixed(1) + ' s' : ''}${this.vision ? ' · camera photo attached: ' + (this.photo || 'no') : ''}\nLabel mode: ${this.label ? `yes · frames ${this.label.frames} · best sharpness ${this.label.sharp ?? '–'} (max ${this.label.maxSharp ?? '–'}) · OCR chars ${this.label.chars ?? 0} · ${this.label.camera || '?'} camera · coach words ${this.label.coached ?? 0}${this.label.why ? ' · ended: ' + this.label.why : ''}${this.labelWhy ? ' · ' + this.labelWhy : ''}` : 'no'}\nBrain: ${this.brainUsed || '–'}\nVoice speed: ${Neural.rtf ? 'real-time factor ' + Neural.rtf.toFixed(2) + (Neural.rtf < 1 ? ' (faster than real time)' : ' (slower than real time)') : '–'} · ${Neural.backend || Neural.msg || ''}`;
 } };
 async function ask(text) {
   text = String(text || '').trim(); if (!text) return;
@@ -742,7 +815,7 @@ async function ask(text) {
   setBusy('thinking'); G.think(true); Head.look(0.4, -0.3);
   Wake.resume(true);                                        // detector stays on while thinking/speaking, so "Hey Gibson" can interrupt
   const label = !!(window.GibsonLabel && LABEL_RE.test(text)), vision = !label && !!(window.GibsonSnap && VISION_RE.test(text));
-  Object.assign(Turn, { t0: performance.now(), brain: null, tts: null, total: null, filler: 0, vision: vision || label, brainUsed: '', label: label ? { frames: 0 } : null });
+  Object.assign(Turn, { t0: performance.now(), brain: null, tts: null, total: null, filler: 0, vision: vision || label, brainUsed: '', label: label ? { frames: 0 } : null, labelWhy: '', searchErr: '' });
   if (vision) G.setExpression('curious', 250);
   if (!label) Filler.arm(my, window.GIBSON_NATIVE ? (vision ? 1 : 600) : 1200, vision ? 'look' : 'think');   // a short line if the answer takes a moment
   const t0 = performance.now();
@@ -977,6 +1050,7 @@ const Wake = {
     if (!this.on || busy === 'listening') return;
     console.log('[gibson] wake word', s.toFixed(2), busy ? '(barge-in while ' + busy + ')' : ''); G.blink(); poke();
     startCommand(true);                                    // stops any speech instantly and listens
+    wakeEyes();
   }
 };
 // Fallback wake: ONE continuous recognition session. On "hey gibson" we keep the same session and take the words that follow
@@ -1046,6 +1120,19 @@ const Head = {
 const _lookAt = G.lookAt;
 G.lookAt = (x, y) => { _lookAt(x, y); if (x != null) Head.look(x, y || 0); };
 
+// wake-up look: quick blink, eyes open wide and look straight ahead for a moment, then back to normal (animation only)
+let wakeEyesT = 0;
+function wakeEyes() {
+  G.setExpression('surprised', 140); G.lookAt(0, 0); clearTimeout(wakeEyesT);
+  setTimeout(() => G.blink(), 260);
+  wakeEyesT = setTimeout(() => { if (busy === 'listening') G.setExpression('smile', 400); setTimeout(() => { if (!busy || busy === 'listening') G.lookAt(null); }, 1800); }, 700);
+}
+// warming up: Kokoro (his voice) is still loading. Subtle sleepy face + faint pulse; replies wait for his voice.
+function warming(on) {
+  document.body.classList.toggle('warming', !!on);
+  if (on) { if (!busy) G.setExpression('sleepy', 600); }
+  else if (!busy) G.setExpression('smile', 900);
+}
 // ------------------------------------------------------------------ start / wake lock / fullscreen
 let started = false, wakeLock = null;
 async function keepAwake() {
@@ -1060,9 +1147,15 @@ async function goFullscreen() {
 function start() {
   if (started) return; started = true; window.GIBSON_STARTED = true;
   $('#start').hidden = true;
-  try { const u = new SpeechSynthesisUtterance(' '); u.volume = 0; speechSynthesis.speak(u); } catch (e) {}   // unlocks TTS on iOS
+  if (!window.GIBSON_NATIVE) try { const u = new SpeechSynthesisUtterance(' '); u.volume = 0; speechSynthesis.speak(u); } catch (e) {}   // unlocks TTS on iOS (never in the app: no phone voice)
   AudioOut.init();                                   // unlock Web Audio inside the tap
   goFullscreen(); keepAwake(); ensureVoices();
+  if (window.GIBSON_NATIVE) {   // app: no tap needed. Listen for "Hey Gibson" right away; the hello waits for his own voice
+    if (Neural.state !== 'ready') warming(true);
+    resumeListening();
+    respond(pick(["Hi Lenny! I'm awake. Just say Hey Gibson.", "Mini Gibson, online and glowing. Say Hey Gibson when you need me."]), 'happy');
+    return;
+  }
   respond(pick(["Hi Lenny! I'm awake. Tap my face whenever you want to talk.", 'Hello Lenny! Mini Gibson, online and glowing. Tap me to chat.']), 'happy');
 }
 $('#start').addEventListener('click', start);
@@ -1183,6 +1276,9 @@ $('#nVoice').innerHTML = NEURAL_VOICES.map(v => `<option value="${v.id}">${v.nam
 $('#pVoice').innerHTML = PIPER_VOICES.map(v => `<option value="${v.id}">${v.name}</option>`).join('');
 bindSettings(); syncUI(); applyDisplay();
 G.idle(true); G.setExpression('smile', 0);
+if (G.setIdleCap) { G.setIdleCap(22); G.setMaxFps(60); }   // cool-down: ~22 fps when idle (12 when nearly still), never more than 60
+if (window.GIBSON_NATIVE) { $('#start').hidden = true; setTimeout(start, 200); }   // app: no tap to start
+addEventListener('pointerdown', () => { try { if (AudioOut.ctx && AudioOut.ctx.state === 'suspended') AudioOut.ctx.resume(); if (Wake.ctx && Wake.ctx.state === 'suspended') Wake.ctx.resume(); } catch (e) {} }, { passive: true });
 // service worker: registered early in index.html (it also makes the page cross-origin isolated)
-window.GibsonApp = { ask, respond, Convo, isExit, parseReply, brain, startCommand, speakOut, stopSpeech, Neural, Piper, Speech, Filler, pickEngine, nvoice, pvoice, Wake, AudioOut, NEURAL_VOICES, PIPER_VOICES, state: () => ({ busy, convo: Convo.on, rec: recMode, neural: Neural.state, neuralMsg: Neural.msg, rtf: Neural.rtf, kokoroBackend: Neural.backend, piper: Piper.state, piperMsg: Piper.msg, piperRtf: Piper.rtf, engine: pickEngine(), coi: self.crossOriginIsolated, wake: Wake.on, wakeReady: Wake.ready, wakeFailed: Wake.failed }), settings: () => JSON.parse(JSON.stringify(Object.assign({}, S, { keys: '(hidden)' }))), Head, version: VERSION };
+window.GibsonApp = { warming, resumeListening, ask, respond, Convo, isExit, parseReply, brain, startCommand, speakOut, stopSpeech, Neural, Piper, Speech, Filler, pickEngine, nvoice, pvoice, Wake, AudioOut, NEURAL_VOICES, PIPER_VOICES, state: () => ({ busy, convo: Convo.on, rec: recMode, neural: Neural.state, neuralMsg: Neural.msg, rtf: Neural.rtf, kokoroBackend: Neural.backend, piper: Piper.state, piperMsg: Piper.msg, piperRtf: Piper.rtf, engine: pickEngine(), coi: self.crossOriginIsolated, wake: Wake.on, wakeReady: Wake.ready, wakeFailed: Wake.failed }), settings: () => JSON.parse(JSON.stringify(Object.assign({}, S, { keys: '(hidden)' }))), Head, version: VERSION };
 })();

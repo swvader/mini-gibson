@@ -19,6 +19,21 @@ for a, b in [("let last = performance.now(), fpsAcc = 0, fpsN = 0;\n", "let last
              ("  config, receive, debug: toggleDebug,", "  config, receive, debug: toggleDebug,\n  setFpsCap: n => { FPS_CAP = Math.max(0, +n || 0); fpsAcc = 0; fpsN = 0; },")]:
     assert js.count(a) == 1, a
     js = js.replace(a, b)
+# app cool-down (v1.0.6): behaviour updates every frame (cheap), but the canvas is only redrawn at a cap:
+# ~22 fps when idle and calm, ~12 fps when only the slow drift moves (no blink, gaze settled), MAX_FPS otherwise (60 on 120 Hz phones)
+for a, b in [("FPS_CAP = 0, lastDraw = 0, blurTick = 0;\n", "FPS_CAP = 0, IDLE_CAP = 0, MAX_FPS = 0, lastDraw = 0, blurTick = 0, capAcc = 0;\n"
+              "function calmCap() {\n"
+              "  if (!IDLE_CAP || !S.idleOn || S.demo || S.trans || S.talk || S.mouth.k > .02 || S.glitch.amt > 0 || S.P['fx.think'] > .01 || S.P['fx.listen'] > .01 || S.listenLevel > .02) return 0;\n"
+              "  const moving = S.blinkVal > 0 || S.t - S.blinkStart < S.blinkDur + .08 || Math.abs(S.gx - (S.rgx || 0)) > .01 || Math.abs(S.gy - (S.rgy || 0)) > .01;\n"
+              "  return moving ? IDLE_CAP : Math.max(8, Math.round(IDLE_CAP * .55));\n"
+              "}\n"),
+             ("  if (S.manual) return;\n  if (FPS_CAP && now - lastDraw < 1000 / FPS_CAP - 4) return;\n  lastDraw = now;\n  const dt = Math.min(.05, Math.max(0, (now - last) / 1000)); last = now;\n  update(dt); render();\n  fpsAcc += dt; fpsN++;\n  if (fpsAcc > .5) { S.fps = fpsN / fpsAcc; fpsAcc = 0; fpsN = 0; autoQuality();",
+              "  if (S.manual) return;\n  const dt = Math.min(.05, Math.max(0, (now - last) / 1000)); last = now;\n  update(dt);\n  const cap = FPS_CAP || calmCap() || MAX_FPS;\n  if (cap && now - lastDraw < 1000 / cap - 4) return;\n  const fdt = Math.min(.25, Math.max(0, (now - lastDraw) / 1000)); lastDraw = now;\n  render(); S.rgx = S.gx; S.rgy = S.gy;\n  fpsAcc += fdt; fpsN++; capAcc += cap || 60;\n  if (fpsAcc > .5) { const want = capAcc / fpsN; S.fps = fpsN / fpsAcc; fpsAcc = 0; fpsN = 0; capAcc = 0; autoQuality(want);"),
+             ("function autoQuality() {", "function autoQuality(want) {"),
+             ("slowN = S.fps < (FPS_CAP ? FPS_CAP * .8 : 48) ? slowN + 1 : 0;", "slowN = S.fps < Math.min(48, (want || 60) * .8) ? slowN + 1 : 0;"),
+             ("  setFpsCap: n => { FPS_CAP = Math.max(0, +n || 0); fpsAcc = 0; fpsN = 0; },", "  setFpsCap: n => { FPS_CAP = Math.max(0, +n || 0); fpsAcc = 0; fpsN = 0; capAcc = 0; },\n  setIdleCap: n => { IDLE_CAP = Math.max(0, +n || 0); }, setMaxFps: n => { MAX_FPS = Math.max(0, +n || 0); },")]:
+    assert js.count(a) == 1, a
+    js = js.replace(a, b)
 (app / 'face.css').write_text('/* generated from gibson-face/index.html by tools/build.py */\n' + css)
 (app / 'face.js').write_text('/* generated from gibson-face/index.html by tools/build.py */\n' + js)
 print('face.js', len(js), 'face.css', len(css))

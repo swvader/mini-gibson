@@ -50,3 +50,12 @@ Head movement (ESP32) is off by default; see the `Head` object in app.js.
 - After "Hey Gibson" or a tap, Gibson keeps listening after every reply with no wake word needed. A faint red glow at the screen edge means the mode is on. To end it, say "stop listening", "that's all", "never mind", "goodbye Gibson", "go to sleep" and so on, or just stay quiet for the timeout (Settings → Conversation mode, 10-60 s, default 25 s). You can interrupt him by tapping, or by saying "Hey Gibson" when the on-device wake word is on.
 - Voice engine choice (Settings → Voice): **Auto** (default, see above), **Kokoro always**, **Piper always**, **Phone voice**.
 - Each reply uses one engine from start to finish, and nothing is ever said twice. If the neural voice can't produce the first audio in time (6 s on Auto, 20 s when an engine is forced), the whole reply goes to the phone voice. With Kokoro forced on a slow phone, playback starts only once the rest will render without gaps of more than about 1 s.
+
+## Android app 1.0.6 notes
+- No tap to start: the app starts by itself and listens for "Hey Gibson" right away (wake word is switched on once for the app).
+- Gibson voice only: replies wait for Kokoro (subtle sleepy face + faint pulse while it warms up). The app never falls back to the phone voice; it is only used if picked by hand.
+- Camera off by default: face tracking defaults off (old setting migrated once). The camera starts only for vision / label questions and turns off after 20 s idle. On the wake word the eyes blink, open wide and look forward (animation only).
+- Cool-down: the face redraws at about 22 fps when idle and calm (about 12 fps when only the slow drift moves) and at most 60 fps otherwise (tools/build.py hooks `setIdleCap` / `setMaxFps`).
+- Label reading coaches continuously (Back / A little more / Closer / Hold still / Turn it a bit / I need more light), one word at most every 1.2 s, until a sharp readable frame or 20 s. A mush photo is never sent.
+- Never-lie rule in the system prompt for every brain.
+- Grok: live questions use xAI's Responses API with the web_search + x_search tools (streamed). If that fails: Gemini with Google Search, else Grok answers and says it can't look it up. Vision goes to Grok as an image_url data URL; a Grok model that can't take images sends the photo to Gemini. "Last turn" shows the brain, model and search used.

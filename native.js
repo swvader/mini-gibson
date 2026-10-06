@@ -5,8 +5,13 @@
   const N = window.GibsonNative; if (!N) return;
   window.GIBSON_NATIVE = true;
   document.documentElement.classList.add('native');
-  const opt = (() => { try { return Object.assign({ faceTrack: true, quietMic: true, labelBack: false }, JSON.parse(localStorage.getItem('gibson.native') || '{}')); } catch (e) { return { faceTrack: true, quietMic: true, labelBack: false }; } })();
+  const opt = (() => { try { return Object.assign({ faceTrack: false, quietMic: true, labelBack: false }, JSON.parse(localStorage.getItem('gibson.native') || '{}')); } catch (e) { return { faceTrack: false, quietMic: true, labelBack: false }; } })();
   const saveOpt = () => localStorage.setItem('gibson.native', JSON.stringify(opt));
+  // 1.0.6: the camera is off by default (continuous face tracking overheated the phone and slowed charging). Turn the old setting off once.
+  if (opt.camV !== 2) { opt.faceTrack = false; opt.camV = 2; saveOpt(); }
+  // the camera only runs for vision / label questions and turns off again after 20 s without one
+  const CAM_IDLE_MS = 20000;
+  const camIdle = () => { clearTimeout(camOffT); if (!opt.faceTrack) camOffT = setTimeout(() => { if (!opt.faceTrack) N.camStop(); }, CAM_IDLE_MS); };
   const H = { sr: new Set() };
   let srCur = null, ttsW = null, snapId = 0, camErr = '', camOffT = 0, labelId = 0; const snaps = new Map(), labels = new Map();
   window.__nativeEvt = (type, d) => {
@@ -21,7 +26,10 @@
     else if (type === 'label') { const L = labels.get(d.id); if (L && L.onHint) L.onHint(d); }
     else if (type === 'labeldone') { const L = labels.get(d.id); if (L) { labels.delete(d.id); L.res(d); } }
     else if (type === 'cam') { if (d.error) { console.warn('[gibson] camera: ' + d.error); camErr = d.error; } }
-    else if (type === 'perm') { if (opt.faceTrack) N.camStart(); }
+    else if (type === 'perm') {   // permissions answered (first run): start face tracking only if chosen; re-arm the wake word now that the mic is allowed
+      if (opt.faceTrack) N.camStart();
+      if (d.mic && window.GibsonApp && GibsonApp.Wake && (GibsonApp.Wake.failed || !GibsonApp.Wake.armed())) { const W = GibsonApp.Wake; W.failed = false; W.pause(); if (!GibsonApp.state().busy) GibsonApp.resumeListening(); }
+    }
   };
   window.__nativeBack = () => { const s = document.getElementById('settings'); if (s && !s.hidden) document.getElementById('sClose').click(); else N.exit(); };
 
@@ -123,13 +131,14 @@
   // (the app keeps a fresh photo while the camera runs; if the camera was off it starts and waits for the first frame)
   window.GibsonSnap = () => new Promise(res => {
     const id = ++snapId; snaps.set(id, res); N.snap(id);
-    setTimeout(() => { if (snaps.has(id)) { snaps.delete(id); console.warn('[gibson] camera photo timed out'); res(null); } }, 5000);
-    if (!opt.faceTrack) { clearTimeout(camOffT); camOffT = setTimeout(() => { if (!opt.faceTrack) N.camStop(); }, 30000); }
+    setTimeout(() => { if (snaps.has(id)) { snaps.delete(id); console.warn('[gibson] camera photo timed out'); res(null); } }, 6000);
+    camIdle();
   });
   // label reading: coached burst on the phone (sharpness + on-device text recognition), returns the best cropped frame + OCR text
   window.GibsonLabel = onHint => new Promise(res => {
-    const id = ++labelId; labels.set(id, { res, onHint }); N.labelStart(id, !!opt.labelBack, 7500);
-    setTimeout(() => { if (labels.has(id)) { labels.delete(id); N.labelStop(id); res(null); } }, 13000);
+    clearTimeout(camOffT);
+    const id = ++labelId; labels.set(id, { res: d => { camIdle(); res(d); }, onHint }); N.labelStart(id, !!opt.labelBack, 20000);   // coach up to ~20 s
+    setTimeout(() => { if (labels.has(id)) { labels.delete(id); N.labelStop(id); camIdle(); res(null); } }, 25000);
   });
   // tiny debug line in Settings: camera + wake word state
   setInterval(() => {
@@ -146,7 +155,7 @@
     if (ve) try { ve.value = window.GibsonApp && GibsonApp.settings().vEngine === 'browser' ? 'browser' : 'neural'; } catch (e) {}
     for (const [id, k] of [['faceTrack', 'faceTrack'], ['quietMic', 'quietMic'], ['labelBack', 'labelBack']]) {
       const el = document.getElementById(id); if (!el) continue; el.checked = !!opt[k];
-      el.addEventListener('change', () => { opt[k] = el.checked; saveOpt(); if (k === 'faceTrack') { if (el.checked) N.camStart(); else { N.camStop(); window.Gibson && Gibson.lookAt(null); } } });
+      el.addEventListener('change', () => { opt[k] = el.checked; saveOpt(); if (k === 'faceTrack') { clearTimeout(camOffT); if (el.checked) N.camStart(); else { N.camStop(); window.Gibson && Gibson.lookAt(null); } } });
     }
     if (opt.faceTrack) N.camStart();
   });
