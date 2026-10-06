@@ -16,6 +16,7 @@
       if (!opt.faceTrack || !window.Gibson) return;
       if (d.none) Gibson.lookAt(null); else Gibson.lookAt(Math.max(-1, Math.min(1, d.x * 1.3)), Math.max(-1, Math.min(1, d.y * 1.1)));
     } else if (type === 'snap') { const f = snaps.get(d.id); if (f) { snaps.delete(d.id); f(d.b64 || null); } }
+    else if (type === 'say') window.__nativeSayDone(d);
     else if (type === 'cam') { if (d.error) console.warn('[gibson] camera: ' + d.error); }
   };
   window.__nativeBack = () => { const s = document.getElementById('settings'); if (s && !s.hidden) document.getElementById('sClose').click(); else N.exit(); };
@@ -48,7 +49,8 @@
       if (m.type === 'load') { this.t0 = performance.now(); N.ttsInit(); }
       else if (m.type === 'gen') {
         if (!m.bench) for (let i = this.jobs.length - 1; i >= 0; i--) if (this.jobs[i].bench >= 1) { this._post({ type: 'error', id: this.jobs[i].id, msg: 'skipped warm-up' }); this.jobs.splice(i, 1); }
-        this.jobs.push(m); this._pump();
+        if (m.bench) this.jobs.push(m); else { const i = this.jobs.findIndex(j => j.bench); i < 0 ? this.jobs.push(m) : this.jobs.splice(i, 0, m); }
+        this._pump();
       } else if (m.type === 'cancel') { this.minEpoch = m.epoch; }
     }
     terminate() {}
@@ -78,10 +80,33 @@
   }
   window.GibsonNativeTts = NativeTts;
 
+  const says = new Map(); let sayId = 0;
+  function wavToFloat(buf) {
+    const v = new DataView(buf); let sr = 22050, off = 12, data = null;
+    while (off + 8 <= buf.byteLength) { const id = String.fromCharCode(v.getUint8(off), v.getUint8(off + 1), v.getUint8(off + 2), v.getUint8(off + 3)), n = v.getUint32(off + 4, true);
+      if (id === 'fmt ') sr = v.getUint32(off + 12, true); if (id === 'data') { data = [off + 8, Math.min(n, buf.byteLength - off - 8)]; break; } off += 8 + n + (n & 1); }
+    if (!data) return null; const pcm = new Int16Array(buf.slice(data[0], data[0] + (data[1] & ~1)));
+    const a = new Float32Array(pcm.length); for (let i = 0; i < pcm.length; i++) a[i] = pcm[i] / 32768; return { a, sr };
+  }
+  async function phoneSay(text, o) {
+    const id = ++sayId; text = String(text || '').trim(); if (!text) return;
+    const d = await new Promise(res => { says.set(id, res); N.say(id, text, (o && o.rate) || 1, (o && o.pitch) || 1); setTimeout(() => { if (says.has(id)) { says.delete(id); res({ error: 'timeout' }); } }, 15000); });
+    if (d.error || id !== sayId) return;
+    const w = wavToFloat(await (await fetch(d.url)).arrayBuffer()); if (!w || id !== sayId) return;
+    return window.GibsonApp.AudioOut.play(w.a, w.sr);
+  }
+  window.__nativeSayDone = d => { const f = says.get(d.id); if (f) { says.delete(d.id); f(d); } };
+  const hookSpeak = () => { if (!window.Gibson || Gibson.__nat) return; const sp0 = Gibson.speak.bind(Gibson), st0 = Gibson.stop.bind(Gibson);
+    Gibson.speak = (t, o) => (o && o.silent) ? sp0(t, o) : phoneSay(t, o); Gibson.stop = () => { sayId++; return st0(); }; Gibson.__nat = true; };
+
   // camera snapshot (JPEG base64) for vision questions; null if the camera isn't available
   window.GibsonSnap = () => new Promise(res => { const id = ++snapId; snaps.set(id, res); N.snap(id); setTimeout(() => { if (snaps.has(id)) { snaps.delete(id); res(null); } }, 3000); });
 
   addEventListener('DOMContentLoaded', () => {
+    hookSpeak();
+    const ve = document.getElementById('vEngine');   // app: Gibson voice always; the phone voice only as a hand-picked last resort
+    if (ve) ve.innerHTML = '<option value="neural">Gibson voice always (wait for it)</option><option value="browser">Phone voice (last resort: robotic, not recommended)</option>';
+    if (ve) try { ve.value = window.GibsonApp && GibsonApp.settings().vEngine === 'browser' ? 'browser' : 'neural'; } catch (e) {}
     for (const [id, k] of [['faceTrack', 'faceTrack'], ['quietMic', 'quietMic']]) {
       const el = document.getElementById(id); if (!el) continue; el.checked = !!opt[k];
       el.addEventListener('change', () => { opt[k] = el.checked; saveOpt(); if (k === 'faceTrack') { if (el.checked) N.camStart(); else { N.camStop(); window.Gibson && Gibson.lookAt(null); } } });

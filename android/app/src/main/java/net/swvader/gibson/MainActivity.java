@@ -14,6 +14,8 @@ import android.os.Looper;
 import android.speech.RecognitionListener;
 import android.speech.RecognizerIntent;
 import android.speech.SpeechRecognizer;
+import android.speech.tts.TextToSpeech;
+import android.speech.tts.UtteranceProgressListener;
 import android.util.Base64;
 import android.view.View;
 import android.view.WindowManager;
@@ -76,6 +78,7 @@ public class MainActivity extends ComponentActivity {
   SpeechRecognizer sr; boolean srWanted, srContinuous, srQuiet = true, srHadResult; String srLang = "en-US"; int srRestarts;
   final List<String> srFinals = new ArrayList<>();
   AudioManager am; boolean muted;
+  TextToSpeech phone; boolean phoneReady; final List<Runnable> phonePending = new ArrayList<>();
   ProcessCameraProvider camProvider; FaceDetector faceDet; volatile boolean faceBusy; volatile int snapWanted = 0; long lastFaceSent, lastFaceSeen;
 
   @Override protected void onCreate(Bundle b) {
@@ -115,7 +118,7 @@ public class MainActivity extends ComponentActivity {
   @Override public void onWindowFocusChanged(boolean f) { super.onWindowFocusChanged(f); if (f) immersive(); }
   @Override public void onRequestPermissionsResult(int c, String[] p, int[] g) { super.onRequestPermissionsResult(c, p, g); emit("perm", new JSONObject()); }
   @Override protected void onPause() { super.onPause(); srWanted = false; if (sr != null) sr.cancel(); unmute(); }
-  @Override protected void onDestroy() { super.onDestroy(); if (sr != null) sr.destroy(); unmute(); if (tts != null) tts.release(); }
+  @Override protected void onDestroy() { super.onDestroy(); if (phone != null) phone.shutdown(); if (sr != null) sr.destroy(); unmute(); if (tts != null) tts.release(); }
   @Override public void onBackPressed() { web.evaluateJavascript("window.__nativeBack && window.__nativeBack()", null); }
 
   void emit(String type, JSONObject o) {
@@ -167,6 +170,31 @@ public class MainActivity extends ComponentActivity {
       .putInt(rate).putInt(rate * 2).putShort((short) 2).putShort((short) 16).put("data".getBytes()).putInt(a.length * 2);
     for (float x : a) bb.putShort((short) Math.max(-32767, Math.min(32767, Math.round(x * 32767))));
     try (FileOutputStream o = new FileOutputStream(f)) { o.write(bb.array()); }
+  }
+
+  // ------------------------------------------------------------------ phone voice (last resort): Android TextToSpeech rendered to a WAV
+  void phoneSay(int id, String text, float rate, float pitch) {
+    Runnable job = () -> {
+      File f = new File(new File(getCacheDir(), "tts"), "p" + (id % 20) + ".wav");
+      phone.setSpeechRate(rate); phone.setPitch(pitch);
+      Bundle b = new Bundle();
+      int r = phone.synthesizeToFile(text, b, f, "s" + id);
+      if (r != TextToSpeech.SUCCESS) emit("say", J("id", id, "error", "synth failed"));
+    };
+    if (phone == null) {
+      phonePending.add(job);
+      phone = new TextToSpeech(this, st -> {
+        phoneReady = st == TextToSpeech.SUCCESS;
+        if (phoneReady) { try { phone.setLanguage(java.util.Locale.US); } catch (Exception e) {} for (Runnable j : phonePending) j.run(); }
+        else for (int i = 0; i < phonePending.size(); i++) emit("say", J("id", id, "error", "no phone voice"));
+        phonePending.clear();
+      });
+      phone.setOnUtteranceProgressListener(new UtteranceProgressListener() {
+        public void onStart(String u) {}
+        public void onDone(String u) { int i = Integer.parseInt(u.substring(1)); emit("say", J("id", i, "url", "https://" + HOST + "/tts/p" + (i % 20) + ".wav?" + i)); }
+        public void onError(String u) { emit("say", J("id", Integer.parseInt(u.substring(1)), "error", "phone voice error")); }
+      });
+    } else if (!phoneReady) phonePending.add(job); else job.run();
   }
 
   // ------------------------------------------------------------------ quiet speech recognition
@@ -268,9 +296,9 @@ public class MainActivity extends ComponentActivity {
       int id = snapWanted; snapWanted = 0;
       try {
         Bitmap bm = img.toBitmap(); Matrix mx = new Matrix(); mx.postRotate(rot);
-        float sc = 768f / Math.max(bm.getWidth(), bm.getHeight()); if (sc < 1) mx.postScale(sc, sc);
+        float sc = 640f / Math.max(bm.getWidth(), bm.getHeight()); if (sc < 1) mx.postScale(sc, sc);
         Bitmap out = Bitmap.createBitmap(bm, 0, 0, bm.getWidth(), bm.getHeight(), mx, true);
-        ByteArrayOutputStream bo = new ByteArrayOutputStream(); out.compress(Bitmap.CompressFormat.JPEG, 80, bo);
+        ByteArrayOutputStream bo = new ByteArrayOutputStream(); out.compress(Bitmap.CompressFormat.JPEG, 70, bo);
         emit("snap", J("id", id, "b64", Base64.encodeToString(bo.toByteArray(), Base64.NO_WRAP)));
       } catch (Throwable e) { emit("snap", J("id", id, "error", String.valueOf(e))); }
     }
@@ -294,7 +322,7 @@ public class MainActivity extends ComponentActivity {
 
   // ------------------------------------------------------------------ JS bridge
   class Bridge {
-    @JavascriptInterface public String info() { return J("app", "1.0.0", "cores", Runtime.getRuntime().availableProcessors(), "model", "kokoro-int8-multi-lang-v1_0").toString(); }
+    @JavascriptInterface public String info() { return J("app", "1.0.1", "cores", Runtime.getRuntime().availableProcessors(), "model", "kokoro-int8-multi-lang-v1_0").toString(); }
     @JavascriptInterface public void ttsInit() { ttsExec.execute(MainActivity.this::ttsLoad); }
     @JavascriptInterface public void tts(int id, String text, int sid, float speed) { ttsExec.execute(() -> { if (tts == null) ttsLoad(); ttsGen(id, text, sid, speed); }); }
     @JavascriptInterface public void srStart(String lang, boolean continuous, boolean quiet) {
@@ -306,6 +334,7 @@ public class MainActivity extends ComponentActivity {
     @JavascriptInterface public void camStart() { main.post(MainActivity.this::camStart); }
     @JavascriptInterface public void camStop() { main.post(MainActivity.this::camStop); }
     @JavascriptInterface public void snap(int id) { main.post(() -> { if (camProvider == null) camStart(); snapWanted = id; }); }
+    @JavascriptInterface public void say(int id, String text, float rate, float pitch) { main.post(() -> phoneSay(id, text, rate, pitch)); }
     @JavascriptInterface public void exit() { main.post(MainActivity.this::finish); }
   }
 }

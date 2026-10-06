@@ -21,6 +21,7 @@ function load() {
 }
 let S = load();
 if (S.vEngineV !== 2) { if (S.vEngine === 'neural') S.vEngine = 'auto'; S.vEngineV = 2; save(); }   // one-time move from the old 'neural' default to Auto
+if (window.GIBSON_NATIVE && S.vEngine !== 'browser') S.vEngine = 'neural';   // Android app: Gibson voice always, never an automatic fallback
 function save() { try { localStorage.setItem(LS, JSON.stringify(S)); } catch (e) {} }
 
 // ------------------------------------------------------------------ providers
@@ -182,8 +183,9 @@ async function brain(userText, onText) {
   remember('user', userText);
   const errors = [];
   const wx = WX_RE.test(userText) ? await weatherContext() : null;
-  const live = LIVE_RE.test(userText);
+  let live = LIVE_RE.test(userText);
   const img = window.GibsonSnap && VISION_RE.test(userText) ? await window.GibsonSnap() : null;   // Android app: look through the camera
+  if (img) live = false;   // camera questions: no web search (faster)
   for (const id of chain()) {
     let got = '';
     try {
@@ -299,7 +301,7 @@ const IS_PHONE = /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent) ||
 let genBusy = 0;
 function genCount(d) { genBusy = Math.max(0, genBusy + d); if (G.setFpsCap) G.setFpsCap(genBusy ? 30 : 0); }
 const Neural = {
-  name: 'Kokoro', w: null, state: 'off', msg: '', id: 0, epoch: 0, pend: new Map(), rtf: null, dev: null, cfg: '', gpuName: '',
+  name: 'Kokoro', cache: new Map(), w: null, state: 'off', msg: '', id: 0, epoch: 0, pend: new Map(), rtf: null, dev: null, cfg: '', gpuName: '',
   async pickDevice() {   // auto: WebGPU (fp16 if the GPU supports it, else fp32) on a real GPU; else CPU (WASM q8)
     if (window.GibsonNativeTts) return { device: 'native', dtype: 'int8' };   // Android app: sherpa-onnx Kokoro on the phone's CPU
     const d = S.nDevice, cpu = { device: 'wasm', dtype: 'q8' };
@@ -341,7 +343,7 @@ const Neural = {
       // these silent renders also pre-warm the model (GPU shaders compiled for short, medium and long inputs) before the first reply
       this.gen('Hi.', nvoice(), 1, 1).catch(() => {});
       this.gen('Hello there, Lenny. Nice to see you.', nvoice(), 1, 2).catch(() => {});
-      this.gen('I polished my pixels just for you, and I am ready for anything you want to build today.', nvoice(), 1, 1).catch(() => {}).then(() => { Filler.prep(); showVoiceState(); });
+      (window.GIBSON_NATIVE ? Promise.resolve() : this.gen('I polished my pixels just for you, and I am ready for anything you want to build today.', nvoice(), 1, 1)).catch(() => {}).then(() => { Filler.prep(); showVoiceState(); });
     }
     else if (m.type === 'loaderror') {
       if (this.dev && this.dev.device === 'webgpu') {
@@ -360,7 +362,13 @@ const Neural = {
     }
   },
   gen(text, voice, speed, bench) {
+    const ck = text + '|' + (voice && voice.id) + '|' + (speed || 1), hit = this.cache && this.cache.get(ck);
+    if (hit) return Promise.resolve({ audio: hit.audio.slice(), sr: hit.sr, ms: 0, cached: true });
     if (!this.w) return Promise.reject(new Error(this.name + ' not loaded'));
+    if (bench === .5 && this.cache) return this._gen(text, voice, speed, bench).then(m => { this.cache.set(ck, { audio: m.audio.slice(), sr: m.sr }); return m; });
+    return this._gen(text, voice, speed, bench);
+  },
+  _gen(text, voice, speed, bench) {
     genCount(1);
     return new Promise((res, rej) => { const id = ++this.id; this.pend.set(id, { res, rej, bench }); this.w.postMessage({ type: 'gen', id, text, voice, speed, epoch: this.epoch, bench }); })
       .finally(() => genCount(-1));
@@ -408,7 +416,7 @@ function pickEngine(force) {
   if (force === 'kokoro' && k) return 'kokoro';
   if (force === 'piper' && p) return 'piper';
   if (S.vEngine === 'browser') return 'phone';
-  if (S.vEngine === 'neural') return k ? 'kokoro' : 'phone';
+  if (S.vEngine === 'neural') return k || (window.GIBSON_NATIVE && Neural.state !== 'error') ? 'kokoro' : 'phone';   // app: wait for the Gibson voice
   if (S.vEngine === 'piper') return p ? 'piper' : 'phone';
   if (k) return 'kokoro';                                                       // auto: Gibson's own voice (Kokoro blends)
   if (p) return 'piper';                                                        // optional extra, only if it was chosen before
@@ -490,23 +498,37 @@ function trimSilence(a, sr) {
 const Filler = {
   clips: new Map(), t: 0, p: null,
   key(eng) { return eng === 'kokoro' ? 'k:' + nvoice().id : eng === 'piper' ? 'p:' + pvoice().id : ''; },
+  LINES: { think: ['Hmm, let me think.', 'One sec.', 'Okay!', 'Hmm.'], look: ['Ooh, let me take a look.'] },
+  SIGNOFF: ["Okay, I'll be here.", 'Alright. I will be right here.', 'Okay. Call me if you need me.', 'Later, man. I will be right here.', 'Logging off. Ping me anytime.'],
   prep() {
+    if (window.GIBSON_NATIVE) {   // app: cache all filler + sign-off lines in the chosen Gibson voice (instant playback later)
+      if (Neural.state !== 'ready') return; const v = nvoice(), sp = S.rate * (v.speed || 1);
+      for (const [kind, lines] of Object.entries(this.LINES)) for (const t of lines) {
+        const k = 'k:' + v.id + ':' + kind + ':' + t; if (this.clips.has(k)) continue; this.clips.set(k, null);
+        Neural.gen(t, v, sp, .5).then(m => this.clips.set(k, { a: trimSilence(m.audio, m.sr), sr: m.sr, kind })).catch(() => this.clips.delete(k));
+      }
+      for (const t of this.SIGNOFF) Neural.gen(t, v, sp, .5).catch(() => {});
+      return;
+    }
     for (const [eng, E, v] of [['kokoro', Neural, nvoice()], ['piper', Piper, pvoice()]]) {
       const k = this.key(eng); if (E.state !== 'ready' || this.clips.has(k)) continue;
       this.clips.set(k, null);
       E.gen('Hmm.', v, eng === 'kokoro' ? (v.speed || 1) : 1, .5).then(m => this.clips.set(k, { a: trimSilence(m.audio, m.sr), sr: m.sr })).catch(() => this.clips.delete(k));
     }
   },
-  arm(my, ms) {
+  arm(my, ms, kind) {
     this.cancel(); if (!S.filler) return;
     this.t = setTimeout(() => {
       if (my !== reqId || busy !== 'thinking') return;
-      const c = this.clips.get(this.key(pickEngine())); if (!c) return;
+      let c = null;
+      if (window.GIBSON_NATIVE) { const pre = 'k:' + nvoice().id + ':' + (kind || 'think') + ':'; const all = [...this.clips].filter(([k, x]) => x && k.startsWith(pre)); if (all.length) c = all[Math.floor(Math.random() * all.length)][1]; }
+      else c = this.clips.get(this.key(pickEngine()));
+      if (!c) return; Turn.filler = c.a.length / c.sr;
       this.p = AudioOut.play(c.a.slice(), c.sr, 'filler');
     }, ms || 1200);
   },
   // the real answer is ready: let the "Hmm" finish only if it's nearly done (never hold the reply more than 0.2 s)
-  wait() { clearTimeout(this.t); const p = this.p; this.p = null; return p ? Promise.race([p, new Promise(r => setTimeout(r, 200))]) : Promise.resolve(); },
+  wait() { clearTimeout(this.t); const p = this.p; this.p = null; return p ? Promise.race([p, new Promise(r => setTimeout(r, window.GIBSON_NATIVE ? 1800 : 200))]) : Promise.resolve(); },   // app: let the short line finish
   cancel() { clearTimeout(this.t); this.p = null; }
 };
 // A spoken reply. Text can arrive in pieces (streamed from the AI): each finished sentence is rendered right away and
@@ -529,7 +551,11 @@ function Speech(onStart, opts) {
   const add = piece => {
     const t = cleanText(piece); if (!t || !/[a-z0-9]/i.test(t)) return;
     // Kokoro: split a long first sentence at a comma so the first audio comes sooner
-    if (eng === 'kokoro' && npieces === 0 && t.length > 42) { const c = t.slice(12, t.length - 10).search(/[,;:—–]\s/); if (c >= 0) { add2(t.slice(0, c + 13)); add2(t.slice(c + 13)); return; } }
+    if (eng === 'kokoro' && npieces === 0 && t.length > 36) {
+      const c = t.slice(10, t.length - 8).search(/[,;:—–]\s/); if (c >= 0) { add2(t.slice(0, c + 11)); add(t.slice(c + 11)); return; }
+      if (t.length > 70) { const m = t.slice(18, 60).match(/\s(?=(and|but|so|because|which|that|when|if|or|then|while)\s)/i); if (m) { const k = 18 + m.index; add2(t.slice(0, k)); add(t.slice(k)); return; } }
+    }
+    if (eng === 'kokoro' && t.length > 150) { const mid = t.length >> 1, c = t.slice(mid - 50, mid + 50).search(/[,;:—–]\s/); if (c >= 0) { const k = mid - 50 + c + 1; add2(t.slice(0, k)); add(t.slice(k)); return; } }
     add2(t);
   };
   const add2 = t => { t = t.trim(); if (!t) return; npieces++; all.push(t); q.push({ text: t, p: E ? E.gen(t, v, sp) : null }); if (q[q.length - 1].p) q[q.length - 1].p.catch(() => {}); kick(); };
@@ -538,14 +564,14 @@ function Speech(onStart, opts) {
     while ((m = buf.match(re))) { buf = buf.slice(m[0].length); add(m[1]); }
     if (final && buf.trim()) { add(buf); buf = ''; }
   };
-  const begin = () => { if (!begun) { begun = true; console.log(`[gibson] voice: ${eng}${E ? ' (' + E.backend + ')' : ''}, first audio ${Math.round(performance.now() - t0)} ms after the first words arrived`); onStart && onStart(eng); } };
+  const begin = () => { if (!begun) { begun = true; Turn.tts = performance.now() - t0; console.log(`[gibson] voice: ${eng}${E ? ' (' + E.backend + ')' : ''}, first audio ${Math.round(performance.now() - t0)} ms after the first words arrived`); onStart && onStart(eng); } };
   const playPhone = async text => { await Filler.wait(); if (my !== speakTok) return; begin(); Wake.echo(true, text); await G.speak(text, speakOpts()); };
   const done = (async () => {
     try {
       let i = 0;
       if (E) {
         const slow = eng === 'kokoro' && (Neural.rtf || 1) > 0.9;           // slow device, user chose Kokoro: buffer ahead
-        const deadline = performance.now() + (S.vEngine === 'auto' ? 6000 : 20000);
+        const deadline = performance.now() + (S.vEngine === 'auto' ? (window.GIBSON_NATIVE ? 10000 : 6000) : window.GIBSON_NATIVE ? 120000 : 20000);
         let fallback = false;
         // first audio: wait for it (with a deadline), plus enough lead time on slow devices
         while (!begun && !fallback) {
@@ -636,6 +662,11 @@ async function signOff() {
   if (my !== reqId) return;
   toStandby('sleepy');
 }
+// last-turn timing, shown in Settings so real phone numbers can be screenshotted
+const Turn = { show() {
+  const el = document.getElementById('timing'); if (!el) return; const f = x => x == null ? '–' : Math.round(x) + ' ms';
+  el.textContent = `Last turn: heard you → first AI words ${f(this.brain)} · first words → Gibson voice ${f(this.tts)} · total until he spoke ${f(this.total)}${this.filler ? ' · filler ' + this.filler.toFixed(1) + ' s' : ''}${this.vision ? ' · with camera photo' : ''}\nVoice speed: ${Neural.rtf ? 'real-time factor ' + Neural.rtf.toFixed(2) + (Neural.rtf < 1 ? ' (faster than real time)' : ' (slower than real time)') : '–'} · ${Neural.backend || Neural.msg || ''}`;
+} };
 async function ask(text) {
   text = String(text || '').trim(); if (!text) return;
   if (isExit(text)) return signOff();
@@ -643,19 +674,23 @@ async function ask(text) {
   stopRec(); stopSpeech(); clearTimeout(backTimer);
   setBusy('thinking'); G.think(true); Head.look(0.4, -0.3);
   Wake.resume(true);                                        // detector stays on while thinking/speaking, so "Hey Gibson" can interrupt
-  Filler.arm(my);                                           // "Hmm." if the answer takes a moment
+  const vision = !!(window.GibsonSnap && VISION_RE.test(text));
+  Object.assign(Turn, { t0: performance.now(), brain: null, tts: null, total: null, filler: 0, vision });
+  if (vision) G.setExpression('curious', 250);
+  Filler.arm(my, window.GIBSON_NATIVE ? (vision ? 1 : 600) : 1200, vision ? 'look' : 'think');   // a short line if the answer takes a moment
   const t0 = performance.now();
   let sp = null, head = '', expr = 'happy';
-  const onStart = () => { if (my === reqId) { setBusy('speaking'); G.setExpression(expr, 350); Head.lookAt(0, 0); Head.express(expr); } };
+  const onStart = () => { if (my === reqId) { Turn.total = performance.now() - Turn.t0; Turn.show(); setBusy('speaking'); G.setExpression(expr, 350); Head.lookAt(0, 0); Head.express(expr); } };
   // streamed reply: read the [expression] tag from the first words, then hand every piece to the voice as it arrives
   const onText = d => {
     if (my !== reqId) return;
+    if (Turn.brain == null) Turn.brain = performance.now() - Turn.t0;
     if (sp) return sp.push(d);
     head += d; const h = head.replace(/^\s+/, '');
     if (/^[\[(]/.test(h) && !/[\])]/.test(h) && h.length < 30) return;            // tag not closed yet
     const m = h.match(/^\s*[\[(]\s*([a-zA-Z _-]{2,24})\s*[\])]\s*[:\-]?\s*/);
     if (m) expr = parseReply(m[0] + 'x').expr;
-    clearTimeout(Filler.t);                                 // words are arriving: no "Hmm" needed
+    if (!window.GIBSON_NATIVE) clearTimeout(Filler.t);      // words are arriving: no "Hmm" needed (app: the voice still needs a moment, keep it)
     sp = Speech(onStart); sp.push(m ? h.slice(m[0].length) : h);
   };
   const res = await brain(text, onText);

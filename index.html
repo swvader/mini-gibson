@@ -61,7 +61,7 @@ if ('serviceWorker' in navigator && location.protocol !== 'file:' && !window.Gib
   });
 }
 </script>
-<style>.native-only{display:none}html.native .native-only{display:block}</style>
+<style>.native-only{display:none}html.native .native-only{display:block}html.native label:has(#pVoice),html.native label:has(#nDevice){display:none}</style>
 </head>
 <body>
 <canvas id="face"></canvas>
@@ -101,6 +101,7 @@ if ('serviceWorker' in navigator && location.protocol !== 'file:' && !window.Gib
     <label>Kokoro runs on <select id="nDevice"><option value="auto">Auto (GPU if this phone has one, else CPU)</option><option value="webgpu-fp16">GPU fp16 (163 MB once)</option><option value="webgpu-fp32">GPU fp32 (326 MB once, most compatible)</option><option value="webgpu-q8">GPU q8 (92 MB once, experimental)</option><option value="wasm">CPU q8, multi-thread (92 MB once; try this if the face stutters)</option></select></label>
     <button id="testVoice" class="go">Test voice</button>
     <pre id="engInfo" style="white-space:pre-wrap;font-size:11px;opacity:.75;margin:6px 0 0"></pre>
+    <pre id="timing" style="white-space:pre-wrap;font-size:11px;opacity:.85;margin:6px 0 0">Last turn: (talk to Gibson once to see timings)</pre>
     <small id="nNote">Voices download once (use Wi-Fi: Piper 63 MB, Kokoro 92-326 MB), then work offline. Kokoro is pre-warmed at start so the first reply doesn't stutter. Until they're ready, Gibson uses the phone voice.</small></div>
    <div class="card"><h3><span>Phone voice (fallback)</span></h3>
     <label>Voice <select id="voice"></select></label>
