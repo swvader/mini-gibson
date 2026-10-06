@@ -27,30 +27,77 @@
       "voice_id": "UtHgrEqdnS474lUyFn5U",
       "parent": "PMOocVoKCEltMVu66gnd",
       "sample": "voice-samples/eleven-cereal-c2.mp3",
-      "summary": "Remix of C, closest to reference: ~0.6 st higher, punchier (shorter vowels, more quick pauses), raspier, thinner/brighter (155 Hz, 14.3 st, 5.0 syl/s, 16.6 pauses/min, HNR 9.0)"
+      "summary": "Remix of C, closest to reference: ~0.6 st higher, punchier (shorter vowels, more quick pauses), raspier, thinner/brighter (155 Hz, 14.3 st, 5.0 syl/s, 16.6 pauses/min, HNR 9.0)",
+      "status": "rejected: too old and gravelly"
     },
     {
       "name": "Gibson Cereal C3",
       "voice_id": "BJu2FQ8xNhQITHHevntL",
       "parent": "PMOocVoKCEltMVu66gnd",
       "sample": "voice-samples/eleven-cereal-c3.mp3",
-      "summary": "Subtle remix of C, keeps C's timbre: wider pitch swings, more pauses, a bit raspier (147 Hz, 14.9 st, 5.1 syl/s, 13.5 pauses/min, HNR 9.1)"
+      "summary": "Subtle remix of C, keeps C's timbre: wider pitch swings, more pauses, a bit raspier (147 Hz, 14.9 st, 5.1 syl/s, 13.5 pauses/min, HNR 9.1)",
+      "status": "rejected: too old and gravelly"
+    },
+    {
+      "name": "Gibson Cereal Y1",
+      "voice_id": "A8MwwT6b6Iw2HjLt3zEG",
+      "parent": "PMOocVoKCEltMVu66gnd",
+      "sample": "voice-samples/eleven-cereal-y1.mp3",
+      "summary": "Youthful remix of C, closest to reference: 168 Hz median, 13.6 st range, smoother (HNR 10.7 dB), relaxed pace"
+    },
+    {
+      "name": "Gibson Cereal Y2",
+      "voice_id": "uShOeRMc5NUpkQDFq0vd",
+      "parent": "PMOocVoKCEltMVu66gnd",
+      "sample": "voice-samples/eleven-cereal-y2.mp3",
+      "summary": "Youthful remix of C, a touch higher and quicker: 177 Hz, 12.8 st, smoother (HNR 10.6 dB)"
     }
   ],
-  "picked": "Gibson Cereal C (Lenny, 2026-10-06); C2/C3 are remixes of C nudged toward measured reference prosody",
+  "picked": "Gibson Cereal C was \"almost right\"; C2/C3 rejected (too old/gravelly); Y1/Y2 are youthful remixes of C (2026-10-06)",
   "reference_prosody": {
-    "source": "analysis only of a public clip compilation; audio deleted, never uploaded",
-    "f0_median_hz": 162,
-    "range_st_p10_p90": 13.8,
-    "pitch_sd_st": 5.33,
-    "syll_per_sec": 4.96,
-    "pauses_per_min": 15.4,
-    "voiced_run_p90_s": 0.58,
-    "hnr_db": 9.6,
+    "source": "analysis only of natural-speech lines in a public clip compilation (reading/broadcast section, other characters excluded); audio deleted, never uploaded",
+    "spans_s": [
+      [
+        0,
+        14.1
+      ],
+      [
+        37.8,
+        46.6
+      ],
+      [
+        47.1,
+        71.6
+      ],
+      [
+        71.9,
+        73.6
+      ],
+      [
+        91.3,
+        94.6
+      ],
+      [
+        119.0,
+        122.1
+      ],
+      [
+        202.9,
+        209.1
+      ]
+    ],
+    "f0_median_hz": 170,
+    "f0_p10_p90_hz": [
+      119,
+      269
+    ],
+    "range_st_p10_p90": 14.2,
+    "hnr_db": 11.0,
     "formants_hz": [
-      521,
-      1548,
-      2512
-    ]
+      507,
+      1519,
+      2487
+    ],
+    "syl_per_s_wordtime": 3.95
   }
 }
