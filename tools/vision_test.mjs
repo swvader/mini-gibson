@@ -7,7 +7,7 @@ const cases = [
   ['take a look', 'vision'], ['Hey Gibson, take a look.', 'vision'], ['look at this', 'vision'], ['look', 'vision'], ['Look!', 'vision'], ['hey gibson look', 'vision'],
   ['what do you see', 'vision'], ['What do you see?', 'vision'], ['what is this', 'vision'], ["what's this", 'vision'], ['whats this', 'vision'], ['um what is this thing', 'vision'],
   ['can you read this', 'label'], ['read this', 'label'], ['hey gibson can you read this for me', 'label'], ['read the label', 'label'], ['what does this say', 'label'], ['what does it say', 'label'],
-  ['take a picture', 'vision'], ['take a photo', 'vision'], ['take a pic', 'vision'], ['snap a pic', 'vision'], ['check this out', 'vision'], ['what am I holding', 'vision'],
+  ['take a picture', 'photo'], ['take a photo', 'photo'], ['take a pic', 'photo'], ['snap a pic', 'photo'], ['hey gibson take a selfie', 'photo'], ['record a video', 'video'], ['start recording', 'video'], ['Gibson, film me', null], ['record a short clip', 'video'], ['how is your battery', null], ['are you running hot', null], ['check this out', 'vision'], ['what am I holding', 'vision'],
   ['see this', 'vision'], ['can you see', 'vision'], ['can you see me', 'vision'], ['tell me what this is', 'vision'], ['look here', 'vision'], ['okay gibson uh look at this', 'vision'],
   ['what does the label say', 'label'], ['read my prescription', 'label'], ['what medicine is this', 'label'], ['hey Gibson. Check this out!', 'vision'], ['do you see this', 'vision'],
   ['look up the weather', null], ["what's the stock price", null], ["what's the stock price of apple", null], ['what is the weather today', null], ['tell me a joke', null],

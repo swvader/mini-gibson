@@ -19,7 +19,9 @@
   window.__nativeEvt = (type, d) => {
     if (type === 'sr') { if (srCur) srCur._evt(d); }
     else if (type.startsWith('tts')) { if (ttsW) ttsW._evt(type, d); }
+    else if (type === 'shoot' || type === 'shot' || type === 'rec' || type === 'recdone') { const f = window.GibsonCam && GibsonCam.on[type]; if (f) f(d); }
     else if (type === 'face') {
+      window.GibsonFace = d.none ? null : Object.assign({ t: Date.now() }, d);
       if (!opt.faceTrack || !window.Gibson) return;
       if (d.none) Gibson.lookAt(null); else Gibson.lookAt(Math.max(-1, Math.min(1, d.x * 1.3)), Math.max(-1, Math.min(1, d.y * 1.1)));
     } else if (type === 'snap') { const f = snaps.get(d.id); if (f) { snaps.delete(d.id); f(d.b64 || null); } }
@@ -144,6 +146,20 @@
 
   // camera snapshot (JPEG base64) for vision questions; null if the camera isn't available
   // (the app keeps a fresh photo while the camera runs; if the camera was off it starts and waits for the first frame)
+  // 1.0.9: phone status + saving photos / video (front camera, gallery)
+  if (N.phoneInfo) window.GibsonPhone = () => { try { return JSON.parse(N.phoneInfo()); } catch (e) { return null; } };
+  if (N.shootStart) {
+    let shotId = 0;
+    const once = (type, ms) => new Promise(res => { const to = setTimeout(() => { GibsonCam.on[type] = null; res({ error: 'timeout' }); }, ms); GibsonCam.on[type] = d => { clearTimeout(to); GibsonCam.on[type] = null; res(d); }; });
+    window.GibsonCam = {
+      on: {},
+      start(video) { clearTimeout(camOffT); window.GibsonFace = null; const p = once('shoot', 8000); N.shootStart(!!video); return p; },
+      photo() { const p = once('shot', 10000); N.takePhoto(++shotId); return p; },
+      recStart(maxSec) { const p = once('rec', 8000); N.recStart(++shotId, maxSec); return p; },
+      recStop() { N.recStop(); },
+      end() { N.shootEnd(); if (opt.faceTrack) setTimeout(() => N.camStart(), 400); }
+    };
+  }
   window.GibsonSnap = () => new Promise(res => {
     const id = ++snapId; snaps.set(id, res); N.snap(id);
     setTimeout(() => { if (snaps.has(id)) { snaps.delete(id); console.warn('[gibson] camera photo timed out'); res(null); } }, 6000);

@@ -32,6 +32,7 @@ import android.webkit.WebViewClient;
 import androidx.activity.ComponentActivity;
 import androidx.camera.core.CameraSelector;
 import androidx.camera.core.ImageAnalysis;
+import androidx.camera.core.ImageCapture;
 import androidx.camera.core.ImageProxy;
 import androidx.camera.lifecycle.ProcessCameraProvider;
 import androidx.core.content.ContextCompat;
@@ -325,8 +326,138 @@ public class MainActivity extends ComponentActivity {
     CameraSelector want = back ? CameraSelector.DEFAULT_BACK_CAMERA : CameraSelector.DEFAULT_FRONT_CAMERA, other = back ? CameraSelector.DEFAULT_FRONT_CAMERA : CameraSelector.DEFAULT_BACK_CAMERA;
     CameraSelector sel = camProvider.hasCamera(want) ? want : other;
     camBack = sel == CameraSelector.DEFAULT_BACK_CAMERA; camHi = hi;
-    camProvider.unbindAll(); camera = camProvider.bindToLifecycle(this, sel, an);
+    camProvider.unbindAll();
+    if (shootMode == 1) {          // saving photos: add a full-quality still capture
+      imgCap = new ImageCapture.Builder().setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY).setTargetRotation(disp).build();
+      camera = camProvider.bindToLifecycle(this, sel, an, imgCap);
+    } else if (shootMode == 2) {   // video: CameraX recorder (HD, falls back lower)
+      androidx.camera.video.Recorder rec = new androidx.camera.video.Recorder.Builder()
+        .setQualitySelector(androidx.camera.video.QualitySelector.from(androidx.camera.video.Quality.HD, androidx.camera.video.FallbackStrategy.lowerQualityOrHigherThan(androidx.camera.video.Quality.SD))).build();
+      vidCap = androidx.camera.video.VideoCapture.withOutput(rec); vidCap.setTargetRotation(disp);
+      camera = camProvider.bindToLifecycle(this, sel, an, vidCap);
+    } else camera = camProvider.bindToLifecycle(this, sel, an);
+    if (shootMode > 0) emit("shoot", J("ready", true, "back", camBack));
   }
+  // ------------------------------------------------------------------ 1.0.9: save photos / record video (front camera; saved to the gallery)
+  volatile int shootMode = 0; ImageCapture imgCap; androidx.camera.video.VideoCapture<androidx.camera.video.Recorder> vidCap; androidx.camera.video.Recording recording; long recT0;
+  void shootStart(boolean video) {
+    shootMode = video ? 2 : 1; faceOn = true;
+    if (camProvider == null) { camStart(); return; }
+    try { bind(false, false); } catch (Exception e) { emit("shoot", J("error", String.valueOf(e))); }
+  }
+  void shootEnd() {
+    if (recording != null) { try { recording.stop(); } catch (Exception e) {} recording = null; }
+    shootMode = 0; imgCap = null; vidCap = null; faceOn = false; camStop();   // camera off afterwards: less heat
+  }
+  String stamp() { return "Gibson_" + new java.text.SimpleDateFormat("yyyyMMdd_HHmmss", java.util.Locale.US).format(new java.util.Date()); }
+  void takePhoto(int id) {
+    if (imgCap == null) { emit("shot", J("id", id, "error", "camera not ready")); return; }
+    String name = stamp();
+    android.content.ContentValues cv = new android.content.ContentValues();
+    cv.put(android.provider.MediaStore.MediaColumns.DISPLAY_NAME, name); cv.put(android.provider.MediaStore.MediaColumns.MIME_TYPE, "image/jpeg");
+    if (android.os.Build.VERSION.SDK_INT >= 29) cv.put(android.provider.MediaStore.MediaColumns.RELATIVE_PATH, "Pictures/MiniGibson");
+    try { imgCap.setTargetRotation(getWindowManager().getDefaultDisplay().getRotation()); } catch (Exception e) {}
+    ImageCapture.OutputFileOptions o = new ImageCapture.OutputFileOptions.Builder(getContentResolver(), android.provider.MediaStore.Images.Media.EXTERNAL_CONTENT_URI, cv).build();
+    imgCap.takePicture(o, ContextCompat.getMainExecutor(this), new ImageCapture.OnImageSavedCallback() {
+      @Override public void onImageSaved(ImageCapture.OutputFileResults r) { emit("shot", J("id", id, "ok", true, "uri", String.valueOf(r.getSavedUri()), "name", name)); }
+      @Override public void onError(androidx.camera.core.ImageCaptureException e) { emit("shot", J("id", id, "error", String.valueOf(e.getMessage()))); }
+    });
+  }
+  @android.annotation.SuppressLint("MissingPermission")
+  void recStart(int id, int maxSec) {
+    if (vidCap == null) { emit("rec", J("id", id, "error", "camera not ready")); return; }
+    String name = stamp();
+    android.content.ContentValues cv = new android.content.ContentValues();
+    cv.put(android.provider.MediaStore.MediaColumns.DISPLAY_NAME, name); cv.put(android.provider.MediaStore.MediaColumns.MIME_TYPE, "video/mp4");
+    if (android.os.Build.VERSION.SDK_INT >= 29) cv.put(android.provider.MediaStore.MediaColumns.RELATIVE_PATH, "Movies/MiniGibson");
+    androidx.camera.video.MediaStoreOutputOptions mo = new androidx.camera.video.MediaStoreOutputOptions.Builder(getContentResolver(), android.provider.MediaStore.Video.Media.EXTERNAL_CONTENT_URI)
+      .setContentValues(cv).setDurationLimitMillis(maxSec * 1000L).build();
+    try {
+      androidx.camera.video.PendingRecording pr = vidCap.getOutput().prepareRecording(this, mo);
+      final boolean audio = ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED;
+      if (audio) pr = pr.withAudioEnabled();
+      recording = pr.start(ContextCompat.getMainExecutor(this), ev -> {
+        if (ev instanceof androidx.camera.video.VideoRecordEvent.Start) { recT0 = System.currentTimeMillis(); emit("rec", J("id", id, "started", true, "audio", audio)); }
+        else if (ev instanceof androidx.camera.video.VideoRecordEvent.Finalize) {
+          androidx.camera.video.VideoRecordEvent.Finalize f = (androidx.camera.video.VideoRecordEvent.Finalize) ev; recording = null;
+          int err = f.getError(); android.net.Uri u = f.getOutputResults().getOutputUri();
+          boolean ok = u != null && !android.net.Uri.EMPTY.equals(u) && (err == 0 || err == androidx.camera.video.VideoRecordEvent.Finalize.ERROR_DURATION_LIMIT_REACHED || err == androidx.camera.video.VideoRecordEvent.Finalize.ERROR_FILE_SIZE_LIMIT_REACHED || err == androidx.camera.video.VideoRecordEvent.Finalize.ERROR_SOURCE_INACTIVE);
+          emit("recdone", J("id", id, "ok", ok, "uri", String.valueOf(u), "ms", System.currentTimeMillis() - recT0, "limit", err == androidx.camera.video.VideoRecordEvent.Finalize.ERROR_DURATION_LIMIT_REACHED, "error", err == 0 ? "" : "code " + err + " " + f.getCause()));
+        }
+      });
+    } catch (Exception e) { emit("rec", J("id", id, "error", String.valueOf(e))); }
+  }
+  // ------------------------------------------------------------------ 1.0.9: phone status for the brain (only real readings; missing = null)
+  boolean askedPhone;
+  String phoneInfo() {
+    JSONObject o = new JSONObject();
+    try {
+      o.put("model", android.os.Build.MANUFACTURER + " " + android.os.Build.MODEL); o.put("android", android.os.Build.VERSION.RELEASE + " (SDK " + android.os.Build.VERSION.SDK_INT + ")");
+      o.put("uptimeMin", android.os.SystemClock.elapsedRealtime() / 60000); o.put("appUptimeMin", (System.currentTimeMillis() - appT0) / 60000);
+      android.content.Intent b = registerReceiver(null, new android.content.IntentFilter(android.content.Intent.ACTION_BATTERY_CHANGED));
+      android.os.BatteryManager bm = (android.os.BatteryManager) getSystemService(BATTERY_SERVICE);
+      if (b != null) {
+        int lvl = b.getIntExtra(android.os.BatteryManager.EXTRA_LEVEL, -1), sc = b.getIntExtra(android.os.BatteryManager.EXTRA_SCALE, 100);
+        if (lvl >= 0) o.put("batteryPct", Math.round(100f * lvl / sc));
+        int t = b.getIntExtra(android.os.BatteryManager.EXTRA_TEMPERATURE, Integer.MIN_VALUE); if (t != Integer.MIN_VALUE) o.put("batteryTempC", t / 10.0);
+        int mv = b.getIntExtra(android.os.BatteryManager.EXTRA_VOLTAGE, -1); if (mv > 0) o.put("batteryVolts", mv / 1000.0);
+        int pl = b.getIntExtra(android.os.BatteryManager.EXTRA_PLUGGED, 0); o.put("plugged", pl == 1 ? "AC charger" : pl == 2 ? "USB" : pl == 4 ? "wireless" : pl == 8 ? "dock" : "not plugged in");
+        int st = b.getIntExtra(android.os.BatteryManager.EXTRA_STATUS, -1); o.put("chargeStatus", st == 2 ? "charging" : st == 3 ? "discharging" : st == 4 ? "not charging" : st == 5 ? "full" : "unknown");
+        int h = b.getIntExtra(android.os.BatteryManager.EXTRA_HEALTH, 0); o.put("batteryHealth", h == 2 ? "good" : h == 3 ? "overheat" : h == 4 ? "dead" : h == 5 ? "over voltage" : h == 7 ? "cold" : "unknown");
+        long cur = bm.getLongProperty(android.os.BatteryManager.BATTERY_PROPERTY_CURRENT_NOW);
+        if (cur != Long.MIN_VALUE && cur != 0) {   // most phones report microamps; some Samsungs report milliamps
+          double ma = android.os.Build.MANUFACTURER.equalsIgnoreCase("samsung") && Math.abs(cur) < 10000 ? cur : cur / 1000.0;
+          o.put("batteryCurrentmA", Math.round(ma)); if (mv > 0) o.put("powerWattsEstimate", Math.round(Math.abs(ma) * mv / 1e5) / 10.0);
+        }
+      }
+      if (android.os.Build.VERSION.SDK_INT >= 29) {
+        android.os.PowerManager pm = (android.os.PowerManager) getSystemService(POWER_SERVICE);
+        int ts = pm.getCurrentThermalStatus(); String[] tn = {"none (cool)", "light", "moderate", "severe", "critical", "emergency", "shutdown"};
+        o.put("thermalStatus", ts >= 0 && ts < tn.length ? tn[ts] : "unknown"); o.put("throttled", ts >= 2 ? "likely (moderate or worse)" : ts == 1 ? "maybe slightly" : "no");
+        if (android.os.Build.VERSION.SDK_INT >= 30) { float hr = pm.getThermalHeadroom(10); if (!Float.isNaN(hr)) o.put("thermalHeadroom", Math.round(hr * 100) / 100.0 + " (1.0 = throttling starts)"); }
+        o.put("batterySaver", pm.isPowerSaveMode());
+      }
+      double cpu = -1; for (int i = 0; i < 80; i++) {   // usually blocked on newer Android; then cpuTempC stays missing
+        try {
+          File d = new File("/sys/class/thermal/thermal_zone" + i); if (!d.exists()) { if (i > 10) break; continue; }
+          String ty = new String(java.nio.file.Files.readAllBytes(new File(d, "type").toPath())).trim().toLowerCase();
+          if (!ty.matches(".*(cpu|tsens|soc|big|little|mid|apc).*")) continue;
+          double v = Double.parseDouble(new String(java.nio.file.Files.readAllBytes(new File(d, "temp").toPath())).trim()); if (v > 1000) v /= 1000;
+          if (v > 10 && v < 125) cpu = Math.max(cpu, v);
+        } catch (Throwable e) {}
+      }
+      if (cpu > 0) o.put("cpuTempC", Math.round(cpu * 10) / 10.0);
+      android.net.ConnectivityManager cm = (android.net.ConnectivityManager) getSystemService(CONNECTIVITY_SERVICE);
+      android.net.NetworkCapabilities nc = cm.getNetworkCapabilities(cm.getActiveNetwork());
+      boolean wifi = nc != null && nc.hasTransport(android.net.NetworkCapabilities.TRANSPORT_WIFI), cell = nc != null && nc.hasTransport(android.net.NetworkCapabilities.TRANSPORT_CELLULAR);
+      o.put("connection", nc == null ? "offline" : wifi ? "Wi-Fi" : cell ? "mobile data" : "other");
+      if (nc != null) { o.put("downlinkMbpsEstimate", nc.getLinkDownstreamBandwidthKbps() / 1000); o.put("uplinkMbpsEstimate", nc.getLinkUpstreamBandwidthKbps() / 1000); }
+      if (wifi) {
+        android.net.wifi.WifiInfo wi = ((android.net.wifi.WifiManager) getApplicationContext().getSystemService(WIFI_SERVICE)).getConnectionInfo();
+        if (wi != null) { o.put("wifiRssiDbm", wi.getRssi()); o.put("wifiLevel0to4", android.net.wifi.WifiManager.calculateSignalLevel(wi.getRssi(), 5)); o.put("wifiLinkMbps", wi.getLinkSpeed());
+          String ss = wi.getSSID(); if (ss != null && !ss.contains("unknown ssid")) o.put("wifiName", ss.replace("\"", "")); else o.put("wifiName", "not readable (needs location permission)"); }
+      }
+      android.telephony.TelephonyManager tm = (android.telephony.TelephonyManager) getSystemService(TELEPHONY_SERVICE);
+      if (tm != null) {
+        try { o.put("carrier", tm.getNetworkOperatorName()); } catch (Throwable e) {}
+        if (android.os.Build.VERSION.SDK_INT >= 29) try {
+          android.telephony.SignalStrength ss = tm.getSignalStrength();
+          if (ss != null) { o.put("cellLevel0to4", ss.getLevel()); for (android.telephony.CellSignalStrength c : ss.getCellSignalStrengths()) { o.put("cellDbm", c.getDbm()); break; } }
+        } catch (Throwable e) {}
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.READ_PHONE_STATE) == PackageManager.PERMISSION_GRANTED) try {
+          int nt = tm.getDataNetworkType();
+          o.put("cellNetwork", nt == 20 ? "5G" : nt == 13 ? "4G LTE (may be 5G non-standalone)" : nt == 18 ? "Wi-Fi calling" : (nt == 3 || nt == 8 || nt == 9 || nt == 10 || nt == 15) ? "3G" : nt == 0 ? "none/unknown" : "2G or other");
+        } catch (Throwable e) {}
+        else { o.put("cellNetwork", "not readable (phone permission not given)"); if (!askedPhone) { askedPhone = true; main.post(() -> requestPermissions(new String[]{Manifest.permission.READ_PHONE_STATE}, 3)); } }
+      }
+      android.os.StatFs fs = new android.os.StatFs(android.os.Environment.getDataDirectory().getPath());
+      o.put("storageFreeGB", Math.round(fs.getAvailableBytes() / 1e8) / 10.0); o.put("storageTotalGB", Math.round(fs.getTotalBytes() / 1e8) / 10.0);
+      android.app.ActivityManager.MemoryInfo mi = new android.app.ActivityManager.MemoryInfo(); ((android.app.ActivityManager) getSystemService(ACTIVITY_SERVICE)).getMemoryInfo(mi);
+      o.put("ramFreeGB", Math.round(mi.availMem / 1e8) / 10.0); o.put("ramTotalGB", Math.round(mi.totalMem / 1e8) / 10.0); o.put("ramLow", mi.lowMemory);
+    } catch (Throwable e) { try { o.put("error", String.valueOf(e)); } catch (Exception x) {} }
+    return o.toString();
+  }
+  final long appT0 = System.currentTimeMillis();
   void focusCenter() {   // tap-to-focus at the centre; front cameras are often fixed-focus, so this may be a no-op
     try {
       if (camera == null) return;
@@ -545,7 +676,7 @@ public class MainActivity extends ComponentActivity {
 
   // ------------------------------------------------------------------ JS bridge
   class Bridge {
-    @JavascriptInterface public String info() { return J("app", "1.0.8", "cores", Runtime.getRuntime().availableProcessors(), "model", "kokoro-int8-multi-lang-v1_0").toString(); }
+    @JavascriptInterface public String info() { return J("app", "1.0.9", "cores", Runtime.getRuntime().availableProcessors(), "model", "kokoro-int8-multi-lang-v1_0").toString(); }
     @JavascriptInterface public void ttsInit() { ttsExec.execute(MainActivity.this::ttsLoad); }
     @JavascriptInterface public void tts(int id, String text, int sid, float speed) { ttsExec.execute(() -> { if (tts == null) ttsLoad(); ttsGen(id, text, sid, speed); }); }
     @JavascriptInterface public void srStart(String lang, boolean continuous, boolean quiet) {
@@ -570,6 +701,12 @@ public class MainActivity extends ComponentActivity {
     @JavascriptInterface public void httpAbort(int id) { java.net.HttpURLConnection c = conns.remove(id); if (c != null) httpExec.execute(c::disconnect); }
     @JavascriptInterface public void labelStart(int id, boolean back, int maxMs) { main.post(() -> MainActivity.this.labelStart(id, back, maxMs)); }
     @JavascriptInterface public void labelStop(int id) { main.post(() -> { if (labelOn && labelId == id) labelFinish(); }); }
+    @JavascriptInterface public String phoneInfo() { return MainActivity.this.phoneInfo(); }
+    @JavascriptInterface public void shootStart(boolean video) { main.post(() -> MainActivity.this.shootStart(video)); }
+    @JavascriptInterface public void shootEnd() { main.post(MainActivity.this::shootEnd); }
+    @JavascriptInterface public void takePhoto(int id) { main.post(() -> MainActivity.this.takePhoto(id)); }
+    @JavascriptInterface public void recStart(int id, int maxSec) { main.post(() -> MainActivity.this.recStart(id, maxSec)); }
+    @JavascriptInterface public void recStop() { main.post(() -> { if (recording != null) recording.stop(); }); }
     @JavascriptInterface public void exit() { main.post(MainActivity.this::finish); }
   }
 }

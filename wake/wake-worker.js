@@ -9,7 +9,7 @@ let mel = null, emb = null, clf = null, ready = false;
 let raw = new Float32Array(0);            // pending samples
 let tail = new Float32Array(480);         // 3 hops of context for the mel model
 let melBuf = [], feat = [];               // mel frames (32) and embeddings (96)
-let threshold = 0.5, cooldownUntil = 0, frames = 0, paused = false, run = 0, need = 2, echo = false, block = false, testMode = false;
+let runMax = 0, threshold = 0.5, cooldownUntil = 0, frames = 0, paused = false, run = 0, need = 2, echo = false, block = false, testMode = false;
 for (let i = 0; i < 76; i++) melBuf.push(new Float32Array(32).fill(1));
 
 function dense(x, W, b, act) {            // W: [out][in]
@@ -30,7 +30,7 @@ async function init(m) {
     ort.InferenceSession.create(m.base + 'embedding_model.onnx', opt),
     fetch(m.base + m.model).then(r => { if (!r.ok) throw new Error('model HTTP ' + r.status); return r.json(); })
   ]);
-  need = clf.need || 2; ready = true; postMessage({ type: 'ready', name: clf.name || 'hey gibson', version: clf.version });
+  need = Math.max(clf.need || 2, 4); ready = true;   // 1.0.9: score must stay high for 4+ frames in a row (~0.3 s) postMessage({ type: 'ready', name: clf.name || 'hey gibson', version: clf.version });
 }
 async function step(chunk) {               // chunk: 1280 samples (int16 scale)
   const x = new Float32Array(1760); x.set(tail, 0); x.set(chunk, 480); tail = chunk.slice(800);
@@ -50,8 +50,8 @@ async function step(chunk) {               // chunk: 1280 samples (int16 scale)
   const now = performance.now();
   // while Gibson's own voice plays: much stricter (score and length), and muted when the line contains his name
   const th = echo ? Math.max(0.97, threshold) : threshold, nd = echo ? need + 3 : need;
-  run = s >= th && !block ? run + 1 : 0;               // require a few consecutive frames: far fewer false wakes
-  if (run >= nd && now > cooldownUntil) { cooldownUntil = now + 2000; run = 0; postMessage({ type: 'wake', s }); }
+  if (s >= th && !block) { run++; runMax = Math.max(runMax, s); } else { run = 0; runMax = 0; }   // sustained: consecutive frames only
+  if (run >= nd && now > cooldownUntil) { cooldownUntil = now + 4000; postMessage({ type: 'wake', s: runMax, frames: run }); run = 0; runMax = 0; }
 }
 let busy = Promise.resolve(), pending = 0, stepMs = 0;
 function onAudio(chunk) {
@@ -69,6 +69,7 @@ self.onmessage = e => {
   else if (m.type === 'testmode') testMode = m.on;
   else if (m.type === 'audio') onAudio(m.data);                      // test hook: feed samples directly
   else if (m.type === 'threshold') threshold = m.v;
+  else if (m.type === 'cool') cooldownUntil = performance.now() + m.ms;
   else if (m.type === 'stats') postMessage({ type: 'stats', stepMs, pending, threshold, need });
   else if (m.type === 'pause') { paused = !!m.on; if (!paused) { frames = 0; feat = []; run = 0; cooldownUntil = 0; melBuf = []; for (let i = 0; i < 76; i++) melBuf.push(new Float32Array(32).fill(1)); } }
 };

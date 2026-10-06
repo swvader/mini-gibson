@@ -3,7 +3,7 @@
 'use strict';
 const G = window.Gibson;
 const $ = s => document.querySelector(s);
-const VERSION = '1.5.0';
+const VERSION = '1.6.0';
 
 // ------------------------------------------------------------------ settings (localStorage only, on this phone)
 const LS = 'gibson.app.v1';
@@ -12,7 +12,7 @@ const DEFAULTS = {
   keys: { grok: '', gemini: '', openai: '', meta: '', custom: '', eleven: '' },
   models: { grok: 'grok-4.20-0309-non-reasoning', gemini: 'gemini-2.5-flash', openai: 'gpt-6-luna', meta: 'muse-spark-1.1', custom: '' },
   customUrl: '', voice: '', rate: 1.0, pitch: 1.1, lang: 'en-US', wake: false,
-  persona: 'andrew', vEngine: 'eleven', eVoice: 'PMOocVoKCEltMVu66gnd', nVoice: 'gibson', pVoice: 'norman', filler: true, robot: false, nDevice: 'auto', wakeEngine: 'ondevice', wakeSens: 0.5, convo: true, convoTimeout: 25, endPause: 1.4,
+  persona: 'andrew', vEngine: 'eleven', eVoice: 'PMOocVoKCEltMVu66gnd', nVoice: 'gibson', pVoice: 'norman', filler: true, robot: false, nDevice: 'auto', wakeEngine: 'ondevice', wakeSens: 0.35, convo: true, convoTimeout: 25, endPause: 1.4,
   robotOffset: false, safe: false, head: false, headTransport: 'websocket', headUrl: ''
 };
 function load() {
@@ -23,6 +23,7 @@ let S = load();
 if (S.vEngineV !== 2) { if (S.vEngine === 'neural') S.vEngine = 'auto'; S.vEngineV = 2; save(); }   // one-time move from the old 'neural' default to Auto
 if (S.vEngineV !== 3) { if (S.vEngine !== 'browser') S.vEngine = 'eleven'; S.vEngineV = 3; save(); }   // 1.0.7: ElevenLabs is the default voice (Kokoro is its fallback)
 if (window.GIBSON_NATIVE && S.vEngine !== 'browser' && S.vEngine !== 'eleven') S.vEngine = 'neural';   // Android app: Gibson voice always, never an automatic phone-voice fallback
+if (S.wakeSensV !== 2) { S.wakeSens = 0.35; S.wakeSensV = 2; save(); }   // 1.0.9: false wake-ups -> strict default (once; slider still works)
 if (window.GIBSON_NATIVE && S.wakeV !== 2) { S.wake = true; S.wakeEngine = 'ondevice'; S.wakeV = 2; save(); }   // app 1.0.6: listening for "Hey Gibson" from the start (once; can still be turned off)
 const NEVER_PHONE = () => (!!window.GIBSON_NATIVE && S.vEngine !== 'browser') || S.vEngine === 'eleven';   // app: the phone voice is never used unless picked by hand
 function save() { try { localStorage.setItem(LS, JSON.stringify(S)); } catch (e) {} }
@@ -69,6 +70,7 @@ Your words are spoken aloud by a text-to-speech voice, so:
 - ALWAYS begin your reply with exactly one expression tag in square brackets that matches your feeling, chosen only from: ${EXPR.join(', ')}.
   Example: "[happy] Good morning, Lenny! I polished my pixels just for you."
 - Use the tag only at the very start. If you don't know something, say so kindly ([thinking] or [confused]).
+- Phone facts (battery, temperature, signal, storage, memory, throttling) come ONLY from a "PHONE STATUS" note attached to Lenny's message. With no such note, say you can't check that right now. Never invent a number.
 NEVER LIE. This rule beats every other instruction and your personality:
 - Never invent, guess or "fill in" facts, numbers, names, prices, scores, doses, dates, or what is in a photo or on a label.
 - Only describe what you can actually see in an attached photo. If there is no photo, it is dark, blurry, cut off or too small, say so plainly and ask Lenny to adjust it (closer, back, hold still, turn it). Never pretend you can see.
@@ -279,14 +281,25 @@ const VISION_TRIG = new RegExp([
   "\\bidentify (?:this|that|it)\\b", "\\buse (?:your|the) camera\\b", "\\bopen your eyes\\b"
 ].join('|'));
 const VM_NOT = /\blook (?:up|for|into|forward|it up|that up|online)\b|\blooking (?:up|for|into|forward)\b|\bsee you\b|\bsee if\b|\bsee what happens\b|\bwe'll see\b|\bweather\b|\bstock|\bprice\b|\bnews\b|\bscore\b/;
+const PHOTO_TRIG = /\b(?:take|snap|grab|get|make|shoot) (?:a |an |another |the |my |me a |us a |our )?(?:quick |nice |cool )?(?:pic|selfie|group pic)\b|\bselfie\b|\bsay cheese\b/;
+const VIDEO_TRIG = /\b(?:record|film|shoot|take|make|start|capture) (?:a |an |me a |us a |another |the )?(?:quick |short |little )?(?:video|movie|clip|recording)\b|\bstart recording\b|\brecord (?:me|us|this|a video)\b|\bstart filming\b|\broll camera\b/;
 function cameraIntent(t) {
   const n = vmNorm(t);
+  if (VIDEO_TRIG.test(n)) return 'video';                  // save to the gallery (handled before the brain)
+  if (PHOTO_TRIG.test(n)) return 'photo';
   if (VM_NOT.test(n) && !/\b(?:read|take a pic|what do you see)\b/.test(n)) return null;
   if (LABEL_TRIG.test(n)) return 'label';
   if (VISION_TRIG.test(n)) return 'vision';
   return null;
 }
 // </vision-match>
+// 1.0.9 phone status: questions about the phone/his body get a fresh reading from Android injected (never invented)
+const PHONE_RE = /\b(battery|charg\w*|plugged|temperature|temp|hot|warm|heat|overheat\w*|cool(?:ing)? down|thermal|throttl\w*|signal|bars|reception|wi-?fi|wifi|network|5g|4g|lte|internet|connection|storage|space left|memory|ram|uptime|cpu|processor|how are you feeling|how do you feel|are you ok(?:ay)?|feeling ok|your health|phone status|system status|what phone|android version|how long have you been (?:on|running|awake))\b/i;
+function phoneBlock() {
+  const p = window.GibsonPhone(); if (!p) return null;
+  const lines = Object.entries(p).filter(([k, v]) => v !== null && v !== '' && k !== 'error').map(([k, v]) => k + ': ' + v).join('; ');
+  return `PHONE STATUS, read from Android just now (this is YOUR body: the phone you run on; not the weather): ${lines}. Use only these numbers. Anything not listed here, or marked not readable, you cannot read: say so plainly, never guess. Watts and Mbps are estimates.`;
+}
 // long answers: explicit asks ("tell me more", "explain", "keep going", a story) or "yes" to his "Want the full story?" offer
 const LONG_RE = /\b(tell me more|more about|more on|explain|go into (?:more )?detail|in detail|more detail|keep going|go on|continue|elaborate|story|stories|walk me through|full story|whole story|long version|break it down|everything about)\b/i;
 const YES_RE = /^\W*(?:yes|yeah|yep|yup|ya|yes please|sure|sure thing|ok(?:ay)?|go ahead|please|do it|go for it|absolutely|of course|definitely|tell me|go on|why not|let's hear it|hit me|i do)\b/i;
@@ -300,6 +313,7 @@ async function brain(userText, onText, opts) {
   const intent = opts.force || cameraIntent(userText);
   Turn.long = !!(opts.long || LONG_RE.test(userText));
   const labelMode = !!(window.GibsonLabel && intent === 'label'), visionMode = !labelMode && !!(window.GibsonSnap && intent);
+  const phone = window.GibsonPhone && PHONE_RE.test(userText) ? phoneBlock() : null;
   let lab = null; if (labelMode) lab = await runLabel();
   Turn.searchErr = '';
   if (lab && lab.b64 && (lab.chars || 0) < 8 && (lab.sharp || 0) < 60) { Turn.labelWhy = 'best frame too blurry to send'; lab.b64 = null; }   // never send a mush photo and let the brain guess
@@ -329,6 +343,7 @@ async function brain(userText, onText, opts) {
     try {
       const msgs = history.slice();
       if (wx && id !== 'demo') msgs[msgs.length - 1] = { role: 'user', content: `${userText}\n\n(${wx})` };
+      if (phone && id !== 'demo') msgs[msgs.length - 1] = Object.assign({}, msgs[msgs.length - 1], { content: msgs[msgs.length - 1].content + '\n\n(' + phone + ')' });
       if (Turn.long && id !== 'demo') msgs[msgs.length - 1] = Object.assign({}, msgs[msgs.length - 1], { content: msgs[msgs.length - 1].content + (opts.more ? '\n\n(He said yes to your offer: continue now with the full, longer version of what you were just telling him; several hundred words is fine. Plain spoken sentences. Do not repeat the short answer.)' : '\n\n(Lenny wants the full, longer version: answer completely; several hundred words is fine. Plain spoken sentences.)') });
       if (img && labelMode && id !== 'demo') msgs[msgs.length - 1] = { role: 'user', image: img, content: msgs[msgs.length - 1].content + `\n\n(Attached: a close-up photo of the label from your ${lab.camera === 'back' ? 'back' : 'front'} camera, cropped to the text. On-device text recognition read: "${(lab.text || '').slice(0, 1500) || '(nothing)'}" (this may contain mistakes; trust the photo). Read the label exactly as printed. If it is a prescription or medicine: say the drug name, strength, directions, and refills or warnings if visible. NEVER guess any number, dose, name or date: if part of it is blurry, cut off or unreadable, say exactly which part is unclear and ask Lenny to turn or move the bottle. Plain sentences for speaking, no lists or symbols.)` };
       else if (img && id !== 'demo') msgs[msgs.length - 1] = { role: 'user', content: msgs[msgs.length - 1].content + '\n\n(Attached: a photo taken a moment ago by your camera eyes, the phone\'s front camera, which faces the person talking to you. Look at it carefully and answer the actual question using what is really in the photo: name the concrete things you see (objects, colors, text, what the person is holding or wearing). 2 to 4 short sentences. Never make things up; if the photo is dark or blurry, say so.)', image: img };
@@ -734,7 +749,7 @@ function trimSilence(a, sr) {
   return a.slice(Math.max(0, i - pad), Math.min(a.length, j + pad));
 }
 // label reading coach lines (pre-rendered in the Gibson voice with the fillers)
-const COACH = { show: 'Hold it up in front of my eyes.', back: 'Back.', more: 'A little more.', closer: 'Closer.', still: 'Hold still.', turn: 'Turn it a bit.', light: 'I need more light.', good: 'Got it. Reading now.' };
+const COACH = { show: 'Hold it up in front of my eyes.', back: 'Back.', more: 'A little more.', closer: 'Closer.', still: 'Hold still.', turn: 'Turn it a bit.', light: 'I need more light.', good: 'Got it. Reading now.', fl: 'A little left.', fr: 'A little right.', fu: 'Up a bit.', fd: 'Down a bit.', fb: 'Move back a bit.', fc: 'Come closer.', perfect: 'Perfect!', n3: 'Three.', n2: 'Two.', n1: 'One.' };
 async function coachSay(key) {
   const v = nvoice(), sp = S.rate * (v.speed || 1);
   try {
@@ -971,6 +986,8 @@ const Turn = { show() {
   el.textContent = `Last turn: heard you → first AI words ${f(this.brain)} · first words → Gibson voice ${f(this.tts)} · total until he spoke ${f(this.total)}${this.filler ? ' · filler ' + this.filler.toFixed(1) + ' s' : ''}${this.vision ? ' · camera photo attached: ' + (this.photo || 'no') : ''}\nLabel mode: ${this.label ? `yes · frames ${this.label.frames} · best sharpness ${this.label.sharp ?? '–'} (max ${this.label.maxSharp ?? '–'}) · OCR chars ${this.label.chars ?? 0} · ${this.label.camera || '?'} camera · coach words ${this.label.coached ?? 0}${this.label.why ? ' · ended: ' + this.label.why : ''}${this.labelWhy ? ' · ' + this.labelWhy : ''}` : 'no'}\nBrain: ${this.brainUsed || '–'}${this.long ? ' · long answer' : ''}${this.lookTag ? ' · brain asked for a photo [' + this.lookTag + ']' : ''}\nVoice: ${this.voice || '–'}${S.vEngine === 'eleven' ? ' · ElevenLabs first audio ' + (Eleven.lastMs != null ? Math.round(Eleven.lastMs) + ' ms' : '–') + ' · ' + Eleven.left() : ''}\nKokoro speed: ${Neural.rtf ? 'real-time factor ' + Neural.rtf.toFixed(2) + (Neural.rtf < 1 ? ' (faster than real time)' : ' (slower than real time)') : '–'} · ${Neural.backend || Neural.msg || ''}`;
 } };
 async function ask(text) {
+  const shoot = window.GibsonCam && cameraIntent(text);
+  if (shoot === 'photo' || shoot === 'video') return Shoot.run(shoot);
   text = String(text || '').trim(); if (!text) return;
   if (isExit(text)) return signOff();
   const my = ++reqId;
@@ -1023,6 +1040,75 @@ async function ask(text) {
   return { expr, reply, provider: res.provider, errors: res.errors };
 }
 let pendingMore = null;
+// ------------------------------------------------------------------ 1.0.9: save a photo / record a video (front camera -> phone gallery)
+// framing coach from face detection (a few seconds max) -> photo: 3, 2, 1, snap  |  video: clapperboard, REC dot + timer, tap to stop (5 min max)
+const Shoot = {
+  rec: false, ui: null,
+  overlay(html) {
+    if (!this.ui) {
+      const st = document.createElement('style'); st.textContent = `#shootUI{position:fixed;inset:0;z-index:50;display:flex;align-items:center;justify-content:center;pointer-events:none;font-family:system-ui,sans-serif;color:#ff2a2a;text-shadow:0 0 18px #f00}
+#shootUI .big{font-size:38vmin;font-weight:800}#shootUI .msg{position:absolute;bottom:8vh;font-size:6vmin;color:#ff6a5a}
+#shootUI .flash{position:absolute;inset:0;background:#fff;animation:sflash .5s forwards}@keyframes sflash{to{opacity:0}}
+#shootUI .rec{position:absolute;top:4vh;left:4vw;font-size:7vmin;font-weight:700;display:flex;align-items:center;gap:2vmin}#shootUI .dot{width:5vmin;height:5vmin;border-radius:50%;background:#f00;box-shadow:0 0 16px #f00;animation:sblink 1s infinite}@keyframes sblink{50%{opacity:.2}}
+#shootUI .tap{position:absolute;bottom:5vh;font-size:5vmin;color:#ff6a5a}
+#shootUI .clap{width:60vmin;height:42vmin;position:relative;background:#111;border:1vmin solid #f22;border-radius:2vmin;box-shadow:0 0 30px #f00}
+#shootUI .clap .top{position:absolute;left:-1vmin;top:-12vmin;width:62vmin;height:10vmin;background:repeating-linear-gradient(-45deg,#f22 0 6vmin,#111 6vmin 12vmin);border:1vmin solid #f22;border-radius:1vmin;transform-origin:0 100%;transform:rotate(-28deg);animation:sclap .7s .5s forwards}
+#shootUI .clap .bar{position:absolute;left:0;right:0;top:0;height:9vmin;background:repeating-linear-gradient(-45deg,#f22 0 6vmin,#111 6vmin 12vmin)}
+#shootUI .clap .txt{position:absolute;top:14vmin;width:100%;text-align:center;font-size:7vmin;font-weight:800;color:#ff3b3b}@keyframes sclap{70%{transform:rotate(3deg)}to{transform:rotate(0)}}`;
+      document.head.appendChild(st); this.ui = document.createElement('div'); this.ui.id = 'shootUI'; document.body.appendChild(this.ui);
+    }
+    this.ui.innerHTML = html || ''; this.ui.style.display = html ? 'flex' : 'none';
+  },
+  sound(kind) {   // tiny synthesized shutter / clap
+    try {
+      const c = AudioOut.ctx || new AudioContext(), n = c.sampleRate * (kind === 'clap' ? .25 : .12) | 0, b = c.createBuffer(1, n, c.sampleRate), d = b.getChannelData(0);
+      for (let i = 0; i < n; i++) d[i] = (Math.random() * 2 - 1) * Math.exp(-i / (c.sampleRate * (kind === 'clap' ? .03 : .015)));
+      const s = c.createBufferSource(), g = c.createGain(); g.gain.value = kind === 'clap' ? .9 : .6; s.buffer = b; s.connect(g); g.connect(c.destination); s.start();
+    } catch (e) {}
+  },
+  async frame(my) {   // up to ~5 s of short coaching from the face position; returns true if a face was seen
+    let good = 0, seen = false; const t0 = Date.now();
+    while (Date.now() - t0 < 5000 && my === reqId) {
+      await new Promise(r => setTimeout(r, 1100)); if (my !== reqId) return seen;
+      const f = window.GibsonFace && Date.now() - window.GibsonFace.t < 900 ? window.GibsonFace : null;
+      if (!f) { this.overlay('<div class="msg">Looking for you…</div>'); continue; }
+      seen = true;
+      // x/y: -1..1 from the centre (x>0 = you are toward your right), s = face width share of the frame
+      const k = f.s > 0.5 ? 'fb' : f.s < 0.14 ? 'fc' : f.x > 0.3 ? 'fl' : f.x < -0.3 ? 'fr' : f.y > 0.35 ? 'fu' : f.y < -0.4 ? 'fd' : null;
+      if (!k) { if (++good >= 1) { this.overlay('<div class="msg">Perfect!</div>'); await coachSay('perfect'); return true; } continue; }
+      good = 0; this.overlay('<div class="msg">' + COACH[k] + '</div>'); await coachSay(k);
+    }
+    return seen;
+  },
+  async run(kind) {
+    const my = ++reqId; stopSpeech(); Wake.pause(); Convo.exit(); setBusy('thinking'); G.setExpression('happy', 300);
+    const done = async (line, expr) => { this.overlay(''); window.GibsonCam.end(); if (my !== reqId) return; if (!line) { afterSpeech(); return; } setBusy('speaking'); G.setExpression(expr || 'happy', 400); await speakOut(line); if (my === reqId) afterSpeech(); };
+    const r = await window.GibsonCam.start(kind === 'video');
+    if (r.error) return done("Sorry, I couldn't start my camera for that.", 'sad');
+    this.overlay('<div class="msg">Get in the frame…</div>');
+    await this.frame(my); if (my !== reqId) return done('');
+    if (kind === 'photo') {
+      for (const [n, k] of [[3, 'n3'], [2, 'n2'], [1, 'n1']]) { if (my !== reqId) return; this.overlay('<div class="big">' + n + '</div>'); const t = Date.now(); await coachSay(k); await new Promise(r => setTimeout(r, Math.max(0, 800 - (Date.now() - t)))); }
+      this.overlay('<div class="flash"></div>'); this.sound('shutter');
+      const s = await window.GibsonCam.photo();
+      return done(s.ok ? 'Got it! The photo is saved in your gallery, in the Mini Gibson album.' : "Sorry, the photo didn't save" + (s.error ? ': ' + String(s.error).slice(0, 60) : '') + '.', s.ok ? 'happy' : 'sad');
+    }
+    // video: clapperboard, then record until tap / 5 min
+    this.overlay('<div class="clap"><div class="bar"></div><div class="top"></div><div class="txt">MINI GIBSON · TAKE 1</div></div>');
+    await new Promise(r => setTimeout(r, 1100)); this.sound('clap'); await new Promise(r => setTimeout(r, 300));
+    if (my !== reqId) return done('');
+    const finished = new Promise(res => { window.GibsonCam.on.recdone = d => { window.GibsonCam.on.recdone = null; res(d); }; });
+    const st = await window.GibsonCam.recStart(300);
+    if (st.error || !st.started) return done("Sorry, I couldn't start recording" + (st.error ? ': ' + String(st.error).slice(0, 60) : '') + '.', 'sad');
+    this.rec = true; const t0 = Date.now();
+    const tick = setInterval(() => { const s = (Date.now() - t0) / 1000 | 0; this.overlay(`<div class="rec"><span class="dot"></span>REC ${s / 60 | 0}:${String(s % 60).padStart(2, '0')}</div><div class="tap">Tap anywhere to stop</div>`); }, 500);
+    const eat = e => { e.stopPropagation(); e.preventDefault(); if (e.type === 'pointerdown') window.GibsonCam.recStop(); };   // tap = stop (not "talk")
+    const evs = ['pointerdown', 'pointerup', 'click']; evs.forEach(t => addEventListener(t, eat, true));
+    const d = await finished; this.rec = false; clearInterval(tick); setTimeout(() => evs.forEach(t => removeEventListener(t, eat, true)), 700);
+    const secs = Math.round((d.ms || 0) / 1000);
+    return done(d.ok ? `Cut! That's a wrap. ${secs} second video saved to your gallery${d.limit ? ', I stopped at the five minute limit' : ''}.` : "Sorry, the video didn't save" + (d.error ? ' (' + String(d.error).slice(0, 50) + ')' : '') + '.', d.ok ? 'happy' : 'sad');
+  }
+};
 function afterSpeech(offered) {
   setBusy(null);
   backTimer = setTimeout(() => { if (!busy) G.setExpression('smile', 900); }, 2200);   // only a timer; never blocks the mic
@@ -1057,16 +1143,21 @@ function stopRec() {
 const limiter = { cmd: [], wake: [] };
 function canRestart(k) { const a = limiter[k], now = Date.now(); while (a.length && now - a[0] > 60000) a.shift(); return a.length < 3; }
 function noteRestart(k) { limiter[k].push(Date.now()); return 300 * 2 ** (limiter[k].length - 1); }   // back-off: 0.3, 0.6, 1.2 s
+// sensitivity slider -> detector threshold. LOWER slider = HIGHER threshold = harder to wake (0.35 -> 0.74, 0.75 -> 0.50).
+function wakeTh() { return Math.min(0.95, Math.max(0.35, 0.95 - 0.6 * (+S.wakeSens || 0.35))); }
+const NAME_RE = /\b(?:gibson|gibsen|gipson|gibbson|gibbs ?on|gib son|give son|gibs son|gibsons?|gibs|jibson|gibbon|hey gib\w*)\b/i;
+const NOISE_RE = /^(?:uh+|um+|hmm+|mm+|ah+|oh+|huh|eh|the|a|an|and|i|it|so|hm)$/i;
 // startCommand(fromWake, auto): user tap / wake word / automatic next turn in conversation mode
 function startCommand(fromWake, auto) {
   if (!SR) { status('Speech recognition is not available in this browser. Type in Settings → Talk to Gibson.'); G.setExpression('confused'); Convo.exit(); return; }
   const my = ++reqId;                                      // interrupts thinking/speaking
+  const verify = !!(fromWake && Wake.last && Wake.last.idle && Date.now() - Wake.last.t < 3000);   // woke from sleep (not mid-conversation): double-check
   const micWasOpen = !!Wake.stream || Wake.opening;
   stopSpeech(); Wake.pause(); stopRec(); clearTimeout(backTimer); clearTimeout(wakeTimer);
   Convo.enter(); if (!auto) Convo.idleSince = Date.now();
   setBusy('listening'); G.listen(true); $('#mic').classList.add('on'); Head.lookAt(0, -0.1);
   // the recognizer needs the mic: the wake detector's mic is closed above; give Android a moment to release it
-  const go = () => { if (my === reqId && busy === 'listening') runCommand(my); };
+  const go = () => { if (my === reqId && busy === 'listening') runCommand(my, { verify, auto: !!auto }); };
   micWasOpen ? setTimeout(go, 350) : go();
 }
 // One turn = one recognition session (continuous, interim results). Finals are collected; the turn ends on OUR silence
@@ -1078,7 +1169,8 @@ function mergeFinal(list, t) {   // Android sometimes repeats earlier text in la
   if (last) { const a = last.toLowerCase(), b = t.toLowerCase(); if (b.startsWith(a)) { list[list.length - 1] = t; return; } if (a.startsWith(b) || a.endsWith(b)) return; }
   list.push(t);
 }
-function runCommand(my) {
+function runCommand(my, o) {
+  o = o || {};
   const turn = { prev: '', fins: [], interim: '', lastHeard: 0, restarts: 0, quiet: 0, done: false, t0: Date.now(), endT: 0 };
   const text = () => [turn.prev, turn.fins.join(' '), turn.interim].join(' ').replace(/\s+/g, ' ').trim();
   const finish = why => {
@@ -1086,6 +1178,13 @@ function runCommand(my) {
     const said = text().replace(WAKE_RE, ' ').replace(/\s+/g, ' ').trim();
     stopRec();                                             // stop the session once (handlers are detached first: no restart)
     if (my !== reqId) return;
+    const raw = text();
+    if (o.verify) {                                        // woke from sleep: only answer if I really heard my name (or the wake word was very strong)
+      const strong = Wake.last && Wake.last.s >= Math.max(0.9, wakeTh() + 0.12);
+      if (!raw || (!NAME_RE.test(raw) && !strong)) { Wake.note(false, raw ? 'no "Gibson" in: ' + raw.slice(0, 40) : 'no speech'); Wake.cool(4000); Convo.exit(); toStandby(null); return; }
+      Wake.note(true, NAME_RE.test(raw) ? 'heard "Gibson"' : 'strong wake score');
+    }
+    if (o.auto && said && (said.length < 3 || NOISE_RE.test(said))) { Convo.exit(); toStandby(null); return; }   // open window: ignore tiny noise
     if (said) { ask(said); return; }                       // ask() switches listening -> thinking directly
     if (Convo.on) { chime(false); status(why === 'error' ? 'Listening stopped (speech recognition error).' : 'Conversation ended: no speech.'); toStandby('neutral'); }
     else toStandby(null);
@@ -1134,7 +1233,7 @@ function runCommand(my) {
   };
   start();
   // watchdog: never stuck listening (silence window in conversation mode, 10 s for a single question; 40 s max per turn)
-  const wd = () => { if (turn.done || my !== reqId) return; if (!text() && Date.now() - turn.t0 > (Convo.on ? Math.max(4000, Convo.left()) : 10000)) return finish('silence'); if (Date.now() - turn.t0 > 40000) return finish('long'); stopRec.wd = setTimeout(wd, 500); };
+  const wd = () => { if (turn.done || my !== reqId) return; if (!text() && Date.now() - turn.t0 > (o.auto ? 7000 : Convo.on ? Math.max(4000, Convo.left()) : 10000)) return finish('silence');   /* open windows (conversation / offers) stay short: 7 s */ if (Date.now() - turn.t0 > 40000) return finish('long'); stopRec.wd = setTimeout(wd, 500); };
   stopRec.wd = setTimeout(wd, 500);
 }
 function cancelListening() { reqId++; stopRec(); toStandby(null); }
@@ -1154,11 +1253,11 @@ const Wake = {
       const to = setTimeout(() => rej(new Error('wake model load timeout')), 45000);
       w.onmessage = e => {
         const m = e.data;
-        if (m.type === 'ready') { clearTimeout(to); this.ready = true; w.postMessage({ type: 'threshold', v: 1 - S.wakeSens }); res(); }
+        if (m.type === 'ready') { clearTimeout(to); this.ready = true; w.postMessage({ type: 'threshold', v: wakeTh() }); res(); }
         else if (m.type === 'error' && m.fatal) { clearTimeout(to); rej(new Error(m.msg)); }
         else if (m.type === 'alive') { this.alive = Date.now(); this.frames = m.frames; }
         else if (m.type === 'score') { this.peak = Math.max(this.peak || 0, m.s); const el = $('#wMeter'); if (el) { el.style.width = Math.round(m.s * 100) + '%'; clearTimeout(this.mt); this.mt = setTimeout(() => { el.style.width = '0'; }, 400); } }
-        else if (m.type === 'wake') this.onWake(m.s);
+        else if (m.type === 'wake') this.onWake(m.s, m.frames);
         else if (m.type === 'stats') this.stats = m;
         else if (m.type === 'slow') console.warn('[gibson] wake detector is falling behind on this phone (' + Math.round(m.ms) + ' ms per 80 ms frame)');
         else if (m.type === 'error') console.warn('[gibson] wake:', m.msg);
@@ -1225,8 +1324,13 @@ const Wake = {
   },
   pause() { this.on = false; this.closeMic(); if (recMode === 'wake') stopRec(); },
   off() { this.pause(); $('#mic').classList.remove('wake'); this.state(S.wake ? '' : 'off'); },
-  onWake(s) {
+  last: null, coolUntil: 0,
+  cool(ms) { this.coolUntil = Date.now() + ms; if (this.worker) this.worker.postMessage({ type: 'cool', ms }); },
+  note(ok, why) { if (this.last) { this.last.ok = ok; this.last.why = why; } const el = $('#wLast'); if (el && this.last) el.textContent = `Last wake: score ${this.last.s.toFixed(2)} (needs ${wakeTh().toFixed(2)}) at ${new Date(this.last.t).toLocaleTimeString()} · ${ok == null ? 'checking…' : ok ? 'accepted' : 'rejected'}${why ? ' (' + why + ')' : ''}`; },
+  onWake(s, frames) {
     if (!this.on || busy === 'listening') return;
+    if (Date.now() < this.coolUntil) return;               // cooldown after a wake or a rejected wake
+    this.cool(4000); this.last = { s, t: Date.now(), ok: null, why: '', frames, idle: !busy && !Convo.on }; this.note(null, '');
     console.log('[gibson] wake word', s.toFixed(2), busy ? '(barge-in while ' + busy + ')' : ''); G.blink(); poke();
     startCommand(true);                                    // stops any speech instantly and listens
     wakeEyes();
@@ -1390,7 +1494,7 @@ function syncUI() {
   $('#endPause').value = S.endPause; $('#epV').textContent = (+S.endPause).toFixed(1) + ' s';
   $('#wakeEngine').value = S.wakeEngine; $('#wakeSens').value = S.wakeSens; $('#sensV').textContent = (+S.wakeSens).toFixed(2);
   $('#lang').value = S.lang; $('#wake').checked = S.wake; $('#wake').disabled = !SR && !window.AudioWorkletNode;
-  $('#wakeNote').textContent = (S.wakeEngine === 'ondevice' ? 'Runs on this phone; no audio leaves it until you say “Hey Gibson”. Then the phone\'s speech recognizer takes your question (one beep on Android). Raise sensitivity if he misses you, lower it if he wakes by himself. Screen must stay on with the app open.' : 'Fallback: uses the browser speech service continuously; Android may beep when it restarts.') + (isIOS ? ' iPhone: keep the app open in front; Siri/Dictation must be enabled for the question part.' : '');
+  $('#wakeNote').textContent = (S.wakeEngine === 'ondevice' ? 'Runs on this phone; no audio leaves it until you say “Hey Gibson”. Then the phone\'s speech recognizer takes your question (one beep on Android). LOWER sensitivity = harder to wake (fewer false wake-ups); raise it only if he misses you. When he wakes up from sleep he only answers if he heard “Gibson” (or the wake word was very clear); otherwise he goes back to sleep silently. Screen must stay on with the app open.' : 'Fallback: uses the browser speech service continuously; Android may beep when it restarts.') + (isIOS ? ' iPhone: keep the app open in front; Siri/Dictation must be enabled for the question part.' : '');
   $('#robotOffset').checked = S.robotOffset; $('#safe').checked = S.safe;
   $('#head').checked = S.head; $('#headOpts').style.display = S.head ? '' : 'none'; $('#headTransport').value = S.headTransport; $('#headUrl').value = S.headUrl;
   $('#ver').textContent = 'v' + VERSION + (navigator.serviceWorker && navigator.serviceWorker.controller ? ' · offline-ready' : '');
@@ -1431,7 +1535,7 @@ function bindSettings() {
     else if (el.id === 'convo') { S.convo = el.checked; if (!S.convo) Convo.exit(); }
     else if (el.id === 'convoTimeout') S.convoTimeout = +el.value;
     else if (el.id === 'endPause') S.endPause = +el.value;
-    else if (el.id === 'wakeSens') { S.wakeSens = +el.value; if (Wake.worker) Wake.worker.postMessage({ type: 'threshold', v: 1 - S.wakeSens }); }
+    else if (el.id === 'wakeSens') { S.wakeSens = +el.value; if (Wake.worker) Wake.worker.postMessage({ type: 'threshold', v: wakeTh() }); }
     else if (el.id === 'robotOffset') S.robotOffset = el.checked;
     else if (el.id === 'safe') S.safe = el.checked;
     else if (el.id === 'head') S.head = el.checked;
