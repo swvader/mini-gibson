@@ -4,8 +4,53 @@
   "created": "2026-10-06",
   "recommended_tts_model": "eleven_flash_v2_5",
   "voices": [
-    {"name": "Gibson Cereal A", "voice_id": "aM2I6Vo8BJzQdxSHsJLD", "sample": "voice-samples/eleven-cereal-a.mp3", "summary": "Closest overall: mid-high nasal rasp, laid-back drawl with wide pitch swings and quick bursts (~169 Hz median, 16 st range)"},
-    {"name": "Gibson Cereal B", "voice_id": "35TDAArJ7p2w9BriPbi5", "sample": "voice-samples/eleven-cereal-b.mp3", "summary": "Raspiest and most manic: brighter, choppier stop-start bursts (~185 Hz, 15 st)"},
-    {"name": "Gibson Cereal C", "voice_id": "PMOocVoKCEltMVu66gnd", "sample": "voice-samples/eleven-cereal-c.mp3", "summary": "Mellowest: a bit lower and warmer, smoother stoner drawl (~152 Hz, 13 st)"}
-  ]
+    {
+      "name": "Gibson Cereal A",
+      "voice_id": "aM2I6Vo8BJzQdxSHsJLD",
+      "sample": "voice-samples/eleven-cereal-a.mp3",
+      "summary": "Closest overall: mid-high nasal rasp, laid-back drawl with wide pitch swings and quick bursts (~169 Hz median, 16 st range)"
+    },
+    {
+      "name": "Gibson Cereal B",
+      "voice_id": "35TDAArJ7p2w9BriPbi5",
+      "sample": "voice-samples/eleven-cereal-b.mp3",
+      "summary": "Raspiest and most manic: brighter, choppier stop-start bursts (~185 Hz, 15 st)"
+    },
+    {
+      "name": "Gibson Cereal C",
+      "voice_id": "PMOocVoKCEltMVu66gnd",
+      "sample": "voice-samples/eleven-cereal-c.mp3",
+      "summary": "Mellowest: a bit lower and warmer, smoother stoner drawl (~152 Hz, 13 st)"
+    },
+    {
+      "name": "Gibson Cereal C2",
+      "voice_id": "UtHgrEqdnS474lUyFn5U",
+      "parent": "PMOocVoKCEltMVu66gnd",
+      "sample": "voice-samples/eleven-cereal-c2.mp3",
+      "summary": "Remix of C, closest to reference: ~0.6 st higher, punchier (shorter vowels, more quick pauses), raspier, thinner/brighter (155 Hz, 14.3 st, 5.0 syl/s, 16.6 pauses/min, HNR 9.0)"
+    },
+    {
+      "name": "Gibson Cereal C3",
+      "voice_id": "BJu2FQ8xNhQITHHevntL",
+      "parent": "PMOocVoKCEltMVu66gnd",
+      "sample": "voice-samples/eleven-cereal-c3.mp3",
+      "summary": "Subtle remix of C, keeps C's timbre: wider pitch swings, more pauses, a bit raspier (147 Hz, 14.9 st, 5.1 syl/s, 13.5 pauses/min, HNR 9.1)"
+    }
+  ],
+  "picked": "Gibson Cereal C (Lenny, 2026-10-06); C2/C3 are remixes of C nudged toward measured reference prosody",
+  "reference_prosody": {
+    "source": "analysis only of a public clip compilation; audio deleted, never uploaded",
+    "f0_median_hz": 162,
+    "range_st_p10_p90": 13.8,
+    "pitch_sd_st": 5.33,
+    "syll_per_sec": 4.96,
+    "pauses_per_min": 15.4,
+    "voiced_run_p90_s": 0.58,
+    "hnr_db": 9.6,
+    "formants_hz": [
+      521,
+      1548,
+      2512
+    ]
+  }
 }
