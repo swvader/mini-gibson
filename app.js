@@ -184,15 +184,24 @@ async function weatherContext() {
   } catch (e) { return 'Live weather: the weather service did not answer right now.'; }
 }
 // Ask the brain chain; auto-fallback to the next provider on any failure (only if nothing was streamed yet).
+const LABEL_RE = /\b(read (this|that|it|the label|the bottle|my (prescription|pill bottle|medicine|medication|pills?|label))|read (?:me )?(?:the|this|my) (?:label|bottle|prescription|box|instructions)|what does (this|that|it|the label) say|what('s| is) (this|that) (medication|medicine|pill|prescription)|what (medication|medicine|pill) is (this|that)|label)\b/i;
 const VISION_RE = /\b(what (do|can) you see|can you see|look at (this|me|that)|what am i (holding|wearing|showing)|what('s| is) (this|that) (in my hand|i'?m holding)|what is this\b|what'?s this\b|how do i look|read (this|that)|what colou?r is|who is (this|that)|describe (this|what you see|me))/i;
 async function brain(userText, onText) {
   remember('user', userText);
   const errors = [];
   const wx = WX_RE.test(userText) ? await weatherContext() : null;
   let live = LIVE_RE.test(userText);
-  const img = window.GibsonSnap && VISION_RE.test(userText) ? await window.GibsonSnap() : null;   // Android app: look through the camera
+  const labelMode = !!(window.GibsonLabel && LABEL_RE.test(userText));
+  let lab = null; if (labelMode) lab = await runLabel();
+  const img = labelMode ? (lab && lab.b64) || null : window.GibsonSnap && VISION_RE.test(userText) ? await window.GibsonSnap() : null;   // Android app: look through the camera
+  if (labelMode && !img) {
+    Turn.photo = 'no';
+    const raw = "[sad] I couldn't get a clear look at the label. Hold it about a hand's width from my eyes, keep it still, and ask me again.";
+    onText && onText(raw); remember('assistant', raw); return { raw, provider: 'camera', errors: ['no label photo' + (lab && lab.error ? ': ' + lab.error : '')], live: false };
+  }
   if (img) live = false;   // camera questions: no web search (faster)
-  if (window.GibsonSnap && VISION_RE.test(userText)) {
+  if (labelMode) Turn.photo = `yes, ${Math.round(img.length * 3 / 4 / 1024)} KB, ${lab.w}×${lab.h}`;
+  else if (window.GibsonSnap && VISION_RE.test(userText)) {
     Turn.photo = img ? `yes, ${Math.round(img.length * 3 / 4 / 1024)} KB` : 'no';
     if (!img) {   // never answer as if he saw something
       const raw = "[sad] My camera eyes didn't work just now, so I can't see anything. Check that Mini Gibson is allowed to use the camera, then ask me again.";
@@ -210,7 +219,8 @@ async function brain(userText, onText) {
     try {
       const msgs = history.slice();
       if (wx && id !== 'demo') msgs[msgs.length - 1] = { role: 'user', content: `${userText}\n\n(${wx})` };
-      if (img && id !== 'demo') msgs[msgs.length - 1] = { role: 'user', content: msgs[msgs.length - 1].content + '\n\n(Attached: a photo taken a moment ago by your camera eyes, the phone\'s front camera, which faces the person talking to you. Look at it carefully and answer the actual question using what is really in the photo: name the concrete things you see (objects, colors, text, what the person is holding or wearing). 1 to 3 short sentences. Never make things up; if the photo is dark or blurry, say so.)', image: img };
+      if (img && labelMode && id !== 'demo') msgs[msgs.length - 1] = { role: 'user', image: img, content: msgs[msgs.length - 1].content + `\n\n(Attached: a close-up photo of the label from your ${lab.camera === 'back' ? 'back' : 'front'} camera, cropped to the text. On-device text recognition read: "${(lab.text || '').slice(0, 1500) || '(nothing)'}" (this may contain mistakes; trust the photo). Read the label exactly as printed. If it is a prescription or medicine: say the drug name, strength, directions, and refills or warnings if visible. NEVER guess any number, dose, name or date: if part of it is blurry, cut off or unreadable, say exactly which part is unclear and ask Lenny to turn or move the bottle. Plain sentences for speaking, no lists or symbols.)` };
+      else if (img && id !== 'demo') msgs[msgs.length - 1] = { role: 'user', content: msgs[msgs.length - 1].content + '\n\n(Attached: a photo taken a moment ago by your camera eyes, the phone\'s front camera, which faces the person talking to you. Look at it carefully and answer the actual question using what is really in the photo: name the concrete things you see (objects, colors, text, what the person is holding or wearing). 1 to 3 short sentences. Never make things up; if the photo is dark or blurry, say so.)', image: img };
       lastBrain = {};
       const raw = await callProvider(id, msgs, t => { got += t; onText && onText(t); }, live);
       remember('assistant', raw); noteBrain(id, errors);
@@ -520,10 +530,30 @@ function trimSilence(a, sr) {
   let i = 0, j = a.length - 1; while (i < j && Math.abs(a[i]) < th) i++; while (j > i && Math.abs(a[j]) < th) j--;
   return a.slice(Math.max(0, i - pad), Math.min(a.length, j + pad));
 }
+// label reading coach lines (pre-rendered in the Gibson voice with the fillers)
+const COACH = { show: 'Hold it up to my eyes.', closer: 'Bring it a little closer.', back: 'Move it back a little, slowly.', still: 'Hold still.', turn: 'Turn the bottle a bit so I can see the rest.', good: 'Got it. Reading now.' };
+async function coachSay(key) {
+  const v = nvoice(), sp = S.rate * (v.speed || 1);
+  try {
+    const m = await Neural.gen(COACH[key], v, sp, .5);   // cached after the first time; Gibson voice only, never the phone voice
+    if (busy !== 'thinking') return;
+    Wake.echo(true, COACH[key]); await AudioOut.play(trimSilence(m.audio, m.sr), m.sr); Wake.echo(false);
+  } catch (e) {}
+}
+async function runLabel() {
+  G.setExpression('curious', 250); Filler.cancel();
+  let last = '', lastT = 0, playing = null;
+  const say = k => { const now = Date.now(); if (playing || !COACH[k] || (k === last && now - lastT < 3500) || now - lastT < 1800) return; last = k; lastT = now; playing = coachSay(k).finally(() => { playing = null; }); };
+  say('show');
+  const d = await window.GibsonLabel(h => { if (h.hint !== 'good') say(h.hint); if (Turn.label) Object.assign(Turn.label, { frames: h.frames }); });
+  if (d && d.b64 && busy === 'thinking') { if (playing) await playing; await coachSay('good'); }
+  Turn.label = d ? { frames: d.frames, sharp: d.sharp, maxSharp: d.maxSharp, chars: d.chars, camera: d.camera } : { frames: 0 };
+  return d;
+}
 const Filler = {
   clips: new Map(), t: 0, p: null,
   key(eng) { return eng === 'kokoro' ? 'k:' + nvoice().id : eng === 'piper' ? 'p:' + pvoice().id : ''; },
-  LINES: { think: ['Hmm, let me think.', 'One sec.', 'Okay!', 'Hmm.'], look: ['Ooh, let me take a look.'] },
+  LINES: { think: ['Hmm, let me think.', 'One sec.', 'Okay!', 'Hmm.'], look: ['Ooh, let me take a look.'], coach: Object.values(COACH) },
   SIGNOFF: ["Okay, I'll be here.", 'Alright. I will be right here.', 'Okay. Call me if you need me.', 'Later, man. I will be right here.', 'Logging off. Ping me anytime.'],
   prep() {
     if (window.GIBSON_NATIVE) {   // app: cache all filler + sign-off lines in the chosen Gibson voice (instant playback later)
@@ -690,7 +720,7 @@ async function signOff() {
 // last-turn timing, shown in Settings so real phone numbers can be screenshotted
 const Turn = { show() {
   const el = document.getElementById('timing'); if (!el) return; const f = x => x == null ? '–' : Math.round(x) + ' ms';
-  el.textContent = `Last turn: heard you → first AI words ${f(this.brain)} · first words → Gibson voice ${f(this.tts)} · total until he spoke ${f(this.total)}${this.filler ? ' · filler ' + this.filler.toFixed(1) + ' s' : ''}${this.vision ? ' · camera photo attached: ' + (this.photo || 'no') : ''}\nBrain: ${this.brainUsed || '–'}\nVoice speed: ${Neural.rtf ? 'real-time factor ' + Neural.rtf.toFixed(2) + (Neural.rtf < 1 ? ' (faster than real time)' : ' (slower than real time)') : '–'} · ${Neural.backend || Neural.msg || ''}`;
+  el.textContent = `Last turn: heard you → first AI words ${f(this.brain)} · first words → Gibson voice ${f(this.tts)} · total until he spoke ${f(this.total)}${this.filler ? ' · filler ' + this.filler.toFixed(1) + ' s' : ''}${this.vision ? ' · camera photo attached: ' + (this.photo || 'no') : ''}\nLabel mode: ${this.label ? `yes · frames ${this.label.frames} · best sharpness ${this.label.sharp ?? '–'} (max ${this.label.maxSharp ?? '–'}) · OCR chars ${this.label.chars ?? 0} · ${this.label.camera || '?'} camera` : 'no'}\nBrain: ${this.brainUsed || '–'}\nVoice speed: ${Neural.rtf ? 'real-time factor ' + Neural.rtf.toFixed(2) + (Neural.rtf < 1 ? ' (faster than real time)' : ' (slower than real time)') : '–'} · ${Neural.backend || Neural.msg || ''}`;
 } };
 async function ask(text) {
   text = String(text || '').trim(); if (!text) return;
@@ -699,10 +729,10 @@ async function ask(text) {
   stopRec(); stopSpeech(); clearTimeout(backTimer);
   setBusy('thinking'); G.think(true); Head.look(0.4, -0.3);
   Wake.resume(true);                                        // detector stays on while thinking/speaking, so "Hey Gibson" can interrupt
-  const vision = !!(window.GibsonSnap && VISION_RE.test(text));
-  Object.assign(Turn, { t0: performance.now(), brain: null, tts: null, total: null, filler: 0, vision, brainUsed: '' });
+  const label = !!(window.GibsonLabel && LABEL_RE.test(text)), vision = !label && !!(window.GibsonSnap && VISION_RE.test(text));
+  Object.assign(Turn, { t0: performance.now(), brain: null, tts: null, total: null, filler: 0, vision: vision || label, brainUsed: '', label: label ? { frames: 0 } : null });
   if (vision) G.setExpression('curious', 250);
-  Filler.arm(my, window.GIBSON_NATIVE ? (vision ? 1 : 600) : 1200, vision ? 'look' : 'think');   // a short line if the answer takes a moment
+  if (!label) Filler.arm(my, window.GIBSON_NATIVE ? (vision ? 1 : 600) : 1200, vision ? 'look' : 'think');   // a short line if the answer takes a moment
   const t0 = performance.now();
   let sp = null, head = '', expr = 'happy';
   const onStart = () => { if (my === reqId) { Turn.total = performance.now() - Turn.t0; Turn.show(); setBusy('speaking'); G.setExpression(expr, 350); Head.lookAt(0, 0); Head.express(expr); } };

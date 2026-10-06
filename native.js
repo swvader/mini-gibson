@@ -5,10 +5,10 @@
   const N = window.GibsonNative; if (!N) return;
   window.GIBSON_NATIVE = true;
   document.documentElement.classList.add('native');
-  const opt = (() => { try { return Object.assign({ faceTrack: true, quietMic: true }, JSON.parse(localStorage.getItem('gibson.native') || '{}')); } catch (e) { return { faceTrack: true, quietMic: true }; } })();
+  const opt = (() => { try { return Object.assign({ faceTrack: true, quietMic: true, labelBack: false }, JSON.parse(localStorage.getItem('gibson.native') || '{}')); } catch (e) { return { faceTrack: true, quietMic: true, labelBack: false }; } })();
   const saveOpt = () => localStorage.setItem('gibson.native', JSON.stringify(opt));
   const H = { sr: new Set() };
-  let srCur = null, ttsW = null, snapId = 0, camErr = '', camOffT = 0; const snaps = new Map();
+  let srCur = null, ttsW = null, snapId = 0, camErr = '', camOffT = 0, labelId = 0; const snaps = new Map(), labels = new Map();
   window.__nativeEvt = (type, d) => {
     if (type === 'sr') { if (srCur) srCur._evt(d); }
     else if (type.startsWith('tts')) { if (ttsW) ttsW._evt(type, d); }
@@ -18,6 +18,8 @@
     } else if (type === 'snap') { const f = snaps.get(d.id); if (f) { snaps.delete(d.id); f(d.b64 || null); } }
     else if (type === 'http') { const f = https.get(d.id); if (f) f(d); }
     else if (type === 'say') window.__nativeSayDone(d);
+    else if (type === 'label') { const L = labels.get(d.id); if (L && L.onHint) L.onHint(d); }
+    else if (type === 'labeldone') { const L = labels.get(d.id); if (L) { labels.delete(d.id); L.res(d); } }
     else if (type === 'cam') { if (d.error) { console.warn('[gibson] camera: ' + d.error); camErr = d.error; } }
     else if (type === 'perm') { if (opt.faceTrack) N.camStart(); }
   };
@@ -124,12 +126,17 @@
     setTimeout(() => { if (snaps.has(id)) { snaps.delete(id); console.warn('[gibson] camera photo timed out'); res(null); } }, 5000);
     if (!opt.faceTrack) { clearTimeout(camOffT); camOffT = setTimeout(() => { if (!opt.faceTrack) N.camStop(); }, 30000); }
   });
+  // label reading: coached burst on the phone (sharpness + on-device text recognition), returns the best cropped frame + OCR text
+  window.GibsonLabel = onHint => new Promise(res => {
+    const id = ++labelId; labels.set(id, { res, onHint }); N.labelStart(id, !!opt.labelBack, 7500);
+    setTimeout(() => { if (labels.has(id)) { labels.delete(id); N.labelStop(id); res(null); } }, 13000);
+  });
   // tiny debug line in Settings: camera + wake word state
   setInterval(() => {
     const el = document.getElementById('natDiag'); if (!el || !window.GibsonApp) return;
     let c = {}; try { c = JSON.parse(N.camInfo()); } catch (e) {}
     const W = GibsonApp.Wake;
-    el.textContent = `Camera: ${c.on ? 'on' : 'off'}, frames ${c.frames || 0}, last photo ${c.photoAge >= 0 ? (c.photoAge / 1000).toFixed(1) + ' s ago' : 'none'}${c.err || camErr ? ' · error: ' + (c.err || camErr) : ''}\nWake word: armed ${W.armed() ? 'yes' : 'no'} · peak score ${(W.peak || 0).toFixed(2)} · audio frames ${W.frames || 0}`;
+    el.textContent = `Camera: ${c.on ? 'on' + (c.back ? ' (back)' : ' (front)') + (c.hi ? ' hi-res' : '') : 'off'}, frames ${c.frames || 0}, last photo ${c.photoAge >= 0 ? (c.photoAge / 1000).toFixed(1) + ' s ago' : 'none'}${c.err || camErr ? ' · error: ' + (c.err || camErr) : ''}\nWake word: armed ${W.armed() ? 'yes' : 'no'} · peak score ${(W.peak || 0).toFixed(2)} · audio frames ${W.frames || 0}`;
   }, 1000);
 
   addEventListener('DOMContentLoaded', () => {
@@ -137,7 +144,7 @@
     const ve = document.getElementById('vEngine');   // app: Gibson voice always; the phone voice only as a hand-picked last resort
     if (ve) ve.innerHTML = '<option value="neural">Gibson voice always (wait for it)</option><option value="browser">Phone voice (last resort: robotic, not recommended)</option>';
     if (ve) try { ve.value = window.GibsonApp && GibsonApp.settings().vEngine === 'browser' ? 'browser' : 'neural'; } catch (e) {}
-    for (const [id, k] of [['faceTrack', 'faceTrack'], ['quietMic', 'quietMic']]) {
+    for (const [id, k] of [['faceTrack', 'faceTrack'], ['quietMic', 'quietMic'], ['labelBack', 'labelBack']]) {
       const el = document.getElementById(id); if (!el) continue; el.checked = !!opt[k];
       el.addEventListener('change', () => { opt[k] = el.checked; saveOpt(); if (k === 'faceTrack') { if (el.checked) N.camStart(); else { N.camStop(); window.Gibson && Gibson.lookAt(null); } } });
     }

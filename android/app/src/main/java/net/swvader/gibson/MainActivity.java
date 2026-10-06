@@ -43,6 +43,14 @@ import com.google.mlkit.vision.face.Face;
 import com.google.mlkit.vision.face.FaceDetection;
 import com.google.mlkit.vision.face.FaceDetector;
 import com.google.mlkit.vision.face.FaceDetectorOptions;
+import com.google.mlkit.vision.text.Text;
+import com.google.mlkit.vision.text.TextRecognition;
+import com.google.mlkit.vision.text.TextRecognizer;
+import com.google.mlkit.vision.text.latin.TextRecognizerOptions;
+import androidx.camera.core.Camera;
+import androidx.camera.core.FocusMeteringAction;
+import androidx.camera.core.MeteringPoint;
+import androidx.camera.core.SurfaceOrientedMeteringPointFactory;
 import com.k2fsa.sherpa.onnx.GeneratedAudio;
 import com.k2fsa.sherpa.onnx.OfflineTts;
 import com.k2fsa.sherpa.onnx.OfflineTtsConfig;
@@ -300,16 +308,123 @@ public class MainActivity extends ComponentActivity {
     f.addListener(() -> {
       try {
         camProvider = f.get();
-        ImageAnalysis an = analysis = new ImageAnalysis.Builder().setTargetResolution(new android.util.Size(640, 480))
-          .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST).setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_RGBA_8888).build();
-        an.setTargetRotation(getWindowManager().getDefaultDisplay().getRotation());
-        an.setAnalyzer(camExec, this::analyze);
-        CameraSelector sel = camProvider.hasCamera(CameraSelector.DEFAULT_FRONT_CAMERA) ? CameraSelector.DEFAULT_FRONT_CAMERA : CameraSelector.DEFAULT_BACK_CAMERA;
-        camProvider.unbindAll(); camProvider.bindToLifecycle(this, sel, an);
+        bind(false, false);
         camErr = ""; emit("cam", J("on", true));
+        if (pendingLabel != null) { Runnable r = pendingLabel; pendingLabel = null; r.run(); }
       } catch (Exception e) { camProvider = null; camErr = String.valueOf(e); emit("cam", J("error", camErr)); }
     }, ContextCompat.getMainExecutor(this));
   }
+  Camera camera; boolean camBack, camHi; Runnable pendingLabel;
+  void bind(boolean back, boolean hi) throws Exception {
+    int disp = getWindowManager().getDefaultDisplay().getRotation(); boolean portrait = disp == android.view.Surface.ROTATION_0 || disp == android.view.Surface.ROTATION_180;
+    android.util.Size sz = hi ? (portrait ? new android.util.Size(1080, 1920) : new android.util.Size(1920, 1080)) : new android.util.Size(640, 480);
+    ImageAnalysis an = analysis = new ImageAnalysis.Builder().setTargetResolution(sz)
+      .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST).setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_RGBA_8888).build();
+    an.setTargetRotation(disp);
+    an.setAnalyzer(camExec, this::analyze);
+    CameraSelector want = back ? CameraSelector.DEFAULT_BACK_CAMERA : CameraSelector.DEFAULT_FRONT_CAMERA, other = back ? CameraSelector.DEFAULT_FRONT_CAMERA : CameraSelector.DEFAULT_BACK_CAMERA;
+    CameraSelector sel = camProvider.hasCamera(want) ? want : other;
+    camBack = sel == CameraSelector.DEFAULT_BACK_CAMERA; camHi = hi;
+    camProvider.unbindAll(); camera = camProvider.bindToLifecycle(this, sel, an);
+  }
+  void focusCenter() {   // tap-to-focus at the centre; front cameras are often fixed-focus, so this may be a no-op
+    try {
+      if (camera == null) return;
+      MeteringPoint pt = new SurfaceOrientedMeteringPointFactory(1f, 1f).createPoint(.5f, .5f, .3f);
+      FocusMeteringAction a = new FocusMeteringAction.Builder(pt, FocusMeteringAction.FLAG_AF | FocusMeteringAction.FLAG_AE).setAutoCancelDuration(3, java.util.concurrent.TimeUnit.SECONDS).build();
+      if (camera.getCameraInfo().isFocusMeteringSupported(a)) camera.getCameraControl().startFocusAndMetering(a);
+    } catch (Throwable e) {}
+  }
+
+  // ------------------------------------------------------------------ label reading: coached burst, sharpest readable frame
+  static final double SHARP_OK = 120;
+  TextRecognizer textRec; volatile boolean labelOn, labelOcrBusy; int labelId, labelFrames, labelBestChars, labelGood; long labelT0, labelMax, labelLastFrame, labelLastFocus;
+  boolean labelWasOn; Bitmap labelBest; Rect labelBestBox; String labelBestText = ""; double labelBestScore = -1, labelBestSharp, labelMaxSharp;
+  void labelStart(int id, boolean back, int maxMs) {
+    if (labelOn) labelFinish();
+    if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) { emit("labeldone", J("id", id, "error", "camera permission not granted")); return; }
+    if (textRec == null) textRec = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS);
+    labelId = id; labelMax = maxMs; labelFrames = 0; labelBestChars = 0; labelGood = 0; labelBest = null; labelBestBox = null; labelBestText = ""; labelBestScore = -1; labelBestSharp = 0; labelMaxSharp = 0;
+    labelWasOn = camProvider != null;
+    Runnable go = () -> {
+      try { bind(back, true); } catch (Exception e) { emit("labeldone", J("id", id, "error", "camera: " + e)); return; }
+      labelT0 = System.currentTimeMillis(); labelLastFrame = 0; labelLastFocus = 0; labelOn = true;
+      main.postDelayed(this::focusCenter, 300);
+      main.postDelayed(() -> { if (labelOn && labelId == id) labelFinish(); }, maxMs + 400);
+    };
+    if (camProvider == null) { pendingLabel = go; camStart(); } else go.run();
+  }
+  void analyzeLabel(ImageProxy img) {
+    long now = System.currentTimeMillis();
+    if (now - labelT0 > labelMax) { main.post(() -> { if (labelOn) labelFinish(); }); return; }
+    if (labelOcrBusy || now - labelLastFrame < 280) return;
+    labelLastFrame = now; labelFrames++;
+    if (now - labelLastFocus > 2000) { labelLastFocus = now; main.post(this::focusCenter); }
+    final int rot = img.getImageInfo().getRotationDegrees();
+    Bitmap raw = img.toBitmap(); Matrix mx = new Matrix(); mx.postRotate(rot);
+    final Bitmap up = rot == 0 ? raw : Bitmap.createBitmap(raw, 0, 0, raw.getWidth(), raw.getHeight(), mx, true);   // upright, never mirrored
+    final int W = up.getWidth(), H = up.getHeight();
+    int cw = (int) (W * .6), ch = (int) (H * .5); float sc = Math.min(1f, 480f / cw);
+    Bitmap cen = Bitmap.createScaledBitmap(Bitmap.createBitmap(up, (W - cw) / 2, (H - ch) / 2, cw, ch), Math.max(3, (int) (cw * sc)), Math.max(3, (int) (ch * sc)), true);
+    int[] px = new int[cen.getWidth() * cen.getHeight()]; cen.getPixels(px, 0, cen.getWidth(), 0, 0, cen.getWidth(), cen.getHeight());
+    final double sharp = Sharp.laplacianVariance(px, cen.getWidth(), cen.getHeight());
+    labelMaxSharp = Math.max(labelMaxSharp, sharp);
+    labelOcrBusy = true; final int id = labelId;
+    textRec.process(InputImage.fromBitmap(up, 0)).addOnSuccessListener(t -> {
+      if (!labelOn || id != labelId) return;
+      int chars = 0; Rect box = null; List<Integer> hs = new ArrayList<>();
+      for (Text.TextBlock b : t.getTextBlocks()) {
+        Rect r = b.getBoundingBox(); if (r == null) continue;
+        chars += b.getText().replaceAll("\\s", "").length();
+        if (box == null) box = new Rect(r); else box.union(r);
+        for (Text.Line l : b.getLines()) { Rect lr = l.getBoundingBox(); if (lr != null) hs.add(lr.height()); }
+      }
+      java.util.Collections.sort(hs); double textH = hs.isEmpty() ? 0 : hs.get(hs.size() / 2) / (double) H;
+      boolean edge = box != null && (box.left < W * .03 || box.right > W * .97);
+      String hint;
+      if (chars < 8) hint = sharp < SHARP_OK * .5 && labelFrames > 3 ? "still" : "show";
+      else if (textH < .018) hint = "closer";
+      else if (sharp < SHARP_OK && textH > .05) hint = "back";
+      else if (sharp < SHARP_OK) hint = "still";
+      else if (edge) hint = "turn";
+      else hint = "good";
+      double score = chars * Math.min(1.0, sharp / SHARP_OK) * (edge ? .85 : 1);
+      if (score > labelBestScore) { labelBestScore = score; labelBest = up; labelBestBox = box; labelBestText = t.getText(); labelBestSharp = sharp; labelBestChars = chars; }
+      if ("good".equals(hint)) labelGood++;
+      emit("label", J("id", id, "hint", hint, "sharp", Math.round(sharp), "chars", chars, "frames", labelFrames, "textH", Math.round(textH * 1000) / 1000.0));
+      if ((sharp >= SHARP_OK && chars >= 40 && !edge) || labelGood >= 2) labelFinish();   // sharp + readable: stop early
+    }).addOnFailureListener(e -> {
+      if (sharp > labelBestSharp && labelBestChars == 0) { labelBest = up; labelBestSharp = sharp; labelBestScore = 0; }
+    }).addOnCompleteListener(x -> labelOcrBusy = false);
+  }
+  synchronized void labelFinish() {
+    if (!labelOn) return;
+    labelOn = false; final int id = labelId; final Bitmap best = labelBest; final Rect box = labelBestBox;
+    final String text = labelBestText; final int frames = labelFrames, chars = labelBestChars; final double sharp = labelBestSharp; final boolean back = camBack;
+    labelBest = null;
+    camExec.execute(() -> {
+      JSONObject o = J("id", id, "frames", frames, "chars", chars, "sharp", Math.round(sharp), "maxSharp", Math.round(labelMaxSharp), "camera", back ? "back" : "front", "text", text);
+      try {
+        if (best != null) {
+          Bitmap c = best;
+          if (box != null && chars >= 8) {   // crop to the text plus padding
+            int pw = Math.max(40, (int) (box.width() * .12)), ph = Math.max(40, (int) (box.height() * .18));
+            Rect r = new Rect(Math.max(0, box.left - pw), Math.max(0, box.top - ph), Math.min(best.getWidth(), box.right + pw), Math.min(best.getHeight(), box.bottom + ph));
+            if (r.width() > 50 && r.height() > 50) c = Bitmap.createBitmap(best, r.left, r.top, r.width(), r.height());
+          }
+          float sc = 1920f / Math.max(c.getWidth(), c.getHeight());
+          if (sc < 1) c = Bitmap.createScaledBitmap(c, Math.round(c.getWidth() * sc), Math.round(c.getHeight() * sc), true);
+          ByteArrayOutputStream bo = new ByteArrayOutputStream(); c.compress(Bitmap.CompressFormat.JPEG, 90, bo);
+          o.put("b64", Base64.encodeToString(bo.toByteArray(), Base64.NO_WRAP)); o.put("w", c.getWidth()); o.put("h", c.getHeight());
+        }
+      } catch (Throwable e) { try { o.put("error", String.valueOf(e)); } catch (Exception x) {} }
+      emit("labeldone", o);
+      main.post(() -> {   // back to the normal low-res front camera (or off, if it was off before)
+        try { if (faceOn || labelWasOn) bind(false, false); else camStop(); } catch (Exception e) { camErr = String.valueOf(e); }
+      });
+    });
+  }
+
   void camStop() { if (camProvider != null) { camProvider.unbindAll(); camProvider = null; } lastJpeg = null; emit("cam", J("on", false)); }
   @Override public void onConfigurationChanged(android.content.res.Configuration c) {   // keep photos upright when the phone turns
     super.onConfigurationChanged(c);
@@ -318,6 +433,8 @@ public class MainActivity extends ComponentActivity {
   void analyze(ImageProxy img) {
     try {
       camFrames++;
+      if (labelOn) { analyzeLabel(img); return; }
+      if (camHi) return;   // (label mode just ended; the low-res rebind is on its way)
       final int rot = img.getImageInfo().getRotationDegrees();
       long now = System.currentTimeMillis();
       boolean wantJpeg = snapWanted > 0 || now - lastJpegAt > 300;
@@ -396,7 +513,7 @@ public class MainActivity extends ComponentActivity {
 
   // ------------------------------------------------------------------ JS bridge
   class Bridge {
-    @JavascriptInterface public String info() { return J("app", "1.0.3", "cores", Runtime.getRuntime().availableProcessors(), "model", "kokoro-int8-multi-lang-v1_0").toString(); }
+    @JavascriptInterface public String info() { return J("app", "1.0.4", "cores", Runtime.getRuntime().availableProcessors(), "model", "kokoro-int8-multi-lang-v1_0").toString(); }
     @JavascriptInterface public void ttsInit() { ttsExec.execute(MainActivity.this::ttsLoad); }
     @JavascriptInterface public void tts(int id, String text, int sid, float speed) { ttsExec.execute(() -> { if (tts == null) ttsLoad(); ttsGen(id, text, sid, speed); }); }
     @JavascriptInterface public void srStart(String lang, boolean continuous, boolean quiet) {
@@ -414,10 +531,12 @@ public class MainActivity extends ComponentActivity {
         snapWanted = id; if (camProvider == null) MainActivity.this.camStart();   // camera off: start it, the first frame answers
       });
     }
-    @JavascriptInterface public String camInfo() { return J("on", camProvider != null, "frames", camFrames, "photoAge", lastJpeg == null ? -1 : System.currentTimeMillis() - lastJpegAt, "face", faceOn, "err", camErr).toString(); }
+    @JavascriptInterface public String camInfo() { return J("on", camProvider != null, "frames", camFrames, "photoAge", lastJpeg == null ? -1 : System.currentTimeMillis() - lastJpegAt, "back", camBack, "hi", camHi, "face", faceOn, "err", camErr).toString(); }
     @JavascriptInterface public void say(int id, String text, float rate, float pitch) { main.post(() -> phoneSay(id, text, rate, pitch)); }
     @JavascriptInterface public void http(int id, String url, String method, String headers, String body) { MainActivity.this.http(id, url, method, headers, body); }
     @JavascriptInterface public void httpAbort(int id) { java.net.HttpURLConnection c = conns.remove(id); if (c != null) httpExec.execute(c::disconnect); }
+    @JavascriptInterface public void labelStart(int id, boolean back, int maxMs) { main.post(() -> MainActivity.this.labelStart(id, back, maxMs)); }
+    @JavascriptInterface public void labelStop(int id) { main.post(() -> { if (labelOn && labelId == id) labelFinish(); }); }
     @JavascriptInterface public void exit() { main.post(MainActivity.this::finish); }
   }
 }
