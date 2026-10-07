@@ -98,7 +98,7 @@ public class MainActivity extends ComponentActivity {
     am = (AudioManager) getSystemService(AUDIO_SERVICE);
     setVolumeControlStream(AudioManager.STREAM_MUSIC);
     web = new WebView(this);
-    setContentView(web);
+    root = new android.widget.FrameLayout(this); root.addView(web, new android.widget.FrameLayout.LayoutParams(-1, -1)); setContentView(root);   // 1.0.10: native camera preview / photo review go on top
     immersive();
     WebSettings s = web.getSettings();
     s.setJavaScriptEnabled(true); s.setDomStorageEnabled(true); s.setDatabaseEnabled(true);
@@ -327,27 +327,69 @@ public class MainActivity extends ComponentActivity {
     CameraSelector sel = camProvider.hasCamera(want) ? want : other;
     camBack = sel == CameraSelector.DEFAULT_BACK_CAMERA; camHi = hi;
     camProvider.unbindAll();
-    if (shootMode == 1) {          // saving photos: add a full-quality still capture
-      imgCap = new ImageCapture.Builder().setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY).setTargetRotation(disp).build();
-      camera = camProvider.bindToLifecycle(this, sel, an, imgCap);
-    } else if (shootMode == 2) {   // video: CameraX recorder (HD, falls back lower)
-      androidx.camera.video.Recorder rec = new androidx.camera.video.Recorder.Builder()
-        .setQualitySelector(androidx.camera.video.QualitySelector.from(androidx.camera.video.Quality.HD, androidx.camera.video.FallbackStrategy.lowerQualityOrHigherThan(androidx.camera.video.Quality.SD))).build();
-      vidCap = androidx.camera.video.VideoCapture.withOutput(rec); vidCap.setTargetRotation(disp);
-      camera = camProvider.bindToLifecycle(this, sel, an, vidCap);
+    if (shootMode > 0) {           // photo / video: live preview (native, on top of the page) + capture use case
+      showBox(true);
+      androidx.camera.core.Preview prev = new androidx.camera.core.Preview.Builder().setTargetRotation(disp).build();
+      prev.setSurfaceProvider(pv.getSurfaceProvider());
+      androidx.camera.core.UseCase cap;
+      if (shootMode == 1) cap = imgCap = new ImageCapture.Builder().setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY).setTargetRotation(disp).build();
+      else {
+        androidx.camera.video.Recorder rec = new androidx.camera.video.Recorder.Builder()
+          .setQualitySelector(androidx.camera.video.QualitySelector.from(androidx.camera.video.Quality.HD, androidx.camera.video.FallbackStrategy.lowerQualityOrHigherThan(androidx.camera.video.Quality.SD))).build();
+        vidCap = androidx.camera.video.VideoCapture.withOutput(rec); vidCap.setTargetRotation(disp); cap = vidCap;
+      }
+      try { camera = camProvider.bindToLifecycle(this, sel, prev, an, cap); }
+      catch (Exception e) { camProvider.unbindAll(); camera = camProvider.bindToLifecycle(this, sel, prev, cap); }   // camera can't do 3 streams: no framing faces, preview + capture still work
     } else camera = camProvider.bindToLifecycle(this, sel, an);
     if (shootMode > 0) emit("shoot", J("ready", true, "back", camBack));
   }
   // ------------------------------------------------------------------ 1.0.9: save photos / record video (front camera; saved to the gallery)
   volatile int shootMode = 0; ImageCapture imgCap; androidx.camera.video.VideoCapture<androidx.camera.video.Recorder> vidCap; androidx.camera.video.Recording recording; long recT0;
+  android.widget.FrameLayout root, shootBox; androidx.camera.view.PreviewView pv; android.widget.TextView shootLbl; android.widget.ImageView review;
+  int dp(float v) { return Math.round(v * getResources().getDisplayMetrics().density); }
+  android.widget.FrameLayout.LayoutParams boxLp() {   // centred, framed box (portrait-shaped), ~80% of the short side tall
+    android.util.DisplayMetrics m = getResources().getDisplayMetrics(); int side = Math.min(m.widthPixels, m.heightPixels);
+    int h = m.heightPixels > m.widthPixels ? Math.round(side * 1.0f) : Math.round(side * 0.82f), w = Math.round(h * 0.75f);
+    return new android.widget.FrameLayout.LayoutParams(w, h, android.view.Gravity.CENTER);
+  }
+  android.graphics.drawable.GradientDrawable frameBg() { android.graphics.drawable.GradientDrawable g = new android.graphics.drawable.GradientDrawable(); g.setColor(0xFF000000); g.setCornerRadius(dp(22)); g.setStroke(dp(4), 0xFFFF2A2A); return g; }
+  void showBox(boolean on) {
+    if (shootBox == null) {
+      shootBox = new android.widget.FrameLayout(this); shootBox.setBackground(frameBg()); shootBox.setClipToOutline(true); int p = dp(4); shootBox.setPadding(p, p, p, p);
+      pv = new androidx.camera.view.PreviewView(this); pv.setImplementationMode(androidx.camera.view.PreviewView.ImplementationMode.COMPATIBLE);   // TextureView: draws above the WebView
+      shootBox.addView(pv, new android.widget.FrameLayout.LayoutParams(-1, -1));
+      shootLbl = new android.widget.TextView(this); shootLbl.setTextColor(0xFFFF3B3B); shootLbl.setTextSize(30); shootLbl.setTypeface(android.graphics.Typeface.DEFAULT_BOLD);
+      shootLbl.setShadowLayer(12, 0, 0, 0xFF000000); shootLbl.setGravity(android.view.Gravity.CENTER); shootLbl.setPadding(0, 0, 0, dp(14));
+      shootBox.addView(shootLbl, new android.widget.FrameLayout.LayoutParams(-1, -2, android.view.Gravity.BOTTOM));
+      shootBox.setOnClickListener(v -> { if (recording != null) recording.stop(); });   // tap the preview = stop recording
+      root.addView(shootBox, boxLp());
+    }
+    if (on) { shootBox.setLayoutParams(boxLp()); shootBox.setVisibility(View.VISIBLE); shootBox.bringToFront(); } else { shootBox.setVisibility(View.GONE); shootLbl.setText(""); }
+  }
+  void showReview(android.net.Uri u) {   // the saved photo, on screen for 3 s
+    new Thread(() -> {
+      try {
+        Bitmap bm;
+        if (android.os.Build.VERSION.SDK_INT >= 28) bm = android.graphics.ImageDecoder.decodeBitmap(android.graphics.ImageDecoder.createSource(getContentResolver(), u), (d, i, s) -> { int sc = Math.max(1, Math.max(i.getSize().getWidth(), i.getSize().getHeight()) / 1600); d.setTargetSampleSize(sc); });
+        else { android.graphics.BitmapFactory.Options o = new android.graphics.BitmapFactory.Options(); o.inSampleSize = 2; bm = android.graphics.BitmapFactory.decodeStream(getContentResolver().openInputStream(u), null, o); }
+        final Bitmap b = bm;
+        main.post(() -> {
+          if (review == null) { review = new android.widget.ImageView(this); review.setBackground(frameBg()); review.setClipToOutline(true); review.setScaleType(android.widget.ImageView.ScaleType.CENTER_CROP); int p = dp(4); review.setPadding(p, p, p, p); root.addView(review, boxLp()); }
+          review.setLayoutParams(boxLp()); review.setImageBitmap(b); review.setVisibility(View.VISIBLE); review.bringToFront();
+          main.removeCallbacks(hideReview); main.postDelayed(hideReview, 3000);
+        });
+      } catch (Throwable e) { camErr = "review: " + e; }
+    }).start();
+  }
+  final Runnable hideReview = () -> { if (review != null) { review.setVisibility(View.GONE); review.setImageBitmap(null); } };
   void shootStart(boolean video) {
-    shootMode = video ? 2 : 1; faceOn = true;
+    shootMode = video ? 2 : 1; faceOn = true; showBox(true);
     if (camProvider == null) { camStart(); return; }
     try { bind(false, false); } catch (Exception e) { emit("shoot", J("error", String.valueOf(e))); }
   }
   void shootEnd() {
     if (recording != null) { try { recording.stop(); } catch (Exception e) {} recording = null; }
-    shootMode = 0; imgCap = null; vidCap = null; faceOn = false; camStop();   // camera off afterwards: less heat
+    shootMode = 0; imgCap = null; vidCap = null; faceOn = false; camStop(); if (shootBox != null) showBox(false);   // camera off afterwards: less heat (the photo review stays its 3 s)
   }
   String stamp() { return "Gibson_" + new java.text.SimpleDateFormat("yyyyMMdd_HHmmss", java.util.Locale.US).format(new java.util.Date()); }
   void takePhoto(int id) {
@@ -359,7 +401,7 @@ public class MainActivity extends ComponentActivity {
     try { imgCap.setTargetRotation(getWindowManager().getDefaultDisplay().getRotation()); } catch (Exception e) {}
     ImageCapture.OutputFileOptions o = new ImageCapture.OutputFileOptions.Builder(getContentResolver(), android.provider.MediaStore.Images.Media.EXTERNAL_CONTENT_URI, cv).build();
     imgCap.takePicture(o, ContextCompat.getMainExecutor(this), new ImageCapture.OnImageSavedCallback() {
-      @Override public void onImageSaved(ImageCapture.OutputFileResults r) { emit("shot", J("id", id, "ok", true, "uri", String.valueOf(r.getSavedUri()), "name", name)); }
+      @Override public void onImageSaved(ImageCapture.OutputFileResults r) { if (r.getSavedUri() != null) showReview(r.getSavedUri()); emit("shot", J("id", id, "ok", true, "uri", String.valueOf(r.getSavedUri()), "name", name)); }
       @Override public void onError(androidx.camera.core.ImageCaptureException e) { emit("shot", J("id", id, "error", String.valueOf(e.getMessage()))); }
     });
   }
@@ -676,7 +718,7 @@ public class MainActivity extends ComponentActivity {
 
   // ------------------------------------------------------------------ JS bridge
   class Bridge {
-    @JavascriptInterface public String info() { return J("app", "1.0.9", "cores", Runtime.getRuntime().availableProcessors(), "model", "kokoro-int8-multi-lang-v1_0").toString(); }
+    @JavascriptInterface public String info() { return J("app", "1.0.10", "cores", Runtime.getRuntime().availableProcessors(), "model", "kokoro-int8-multi-lang-v1_0").toString(); }
     @JavascriptInterface public void ttsInit() { ttsExec.execute(MainActivity.this::ttsLoad); }
     @JavascriptInterface public void tts(int id, String text, int sid, float speed) { ttsExec.execute(() -> { if (tts == null) ttsLoad(); ttsGen(id, text, sid, speed); }); }
     @JavascriptInterface public void srStart(String lang, boolean continuous, boolean quiet) {
@@ -703,6 +745,8 @@ public class MainActivity extends ComponentActivity {
     @JavascriptInterface public void labelStop(int id) { main.post(() -> { if (labelOn && labelId == id) labelFinish(); }); }
     @JavascriptInterface public String phoneInfo() { return MainActivity.this.phoneInfo(); }
     @JavascriptInterface public void shootStart(boolean video) { main.post(() -> MainActivity.this.shootStart(video)); }
+    @JavascriptInterface public void shootText(String t) { main.post(() -> { if (shootLbl != null) shootLbl.setText(t); }); }
+    @JavascriptInterface public void shootView(boolean on) { main.post(() -> { if (shootBox != null && shootMode > 0) showBox(on); }); }
     @JavascriptInterface public void shootEnd() { main.post(MainActivity.this::shootEnd); }
     @JavascriptInterface public void takePhoto(int id) { main.post(() -> MainActivity.this.takePhoto(id)); }
     @JavascriptInterface public void recStart(int id, int maxSec) { main.post(() -> MainActivity.this.recStart(id, maxSec)); }

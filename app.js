@@ -3,7 +3,7 @@
 'use strict';
 const G = window.Gibson;
 const $ = s => document.querySelector(s);
-const VERSION = '1.6.0';
+const VERSION = '1.6.1';
 
 // ------------------------------------------------------------------ settings (localStorage only, on this phone)
 const LS = 'gibson.app.v1';
@@ -1044,7 +1044,8 @@ let pendingMore = null;
 // framing coach from face detection (a few seconds max) -> photo: 3, 2, 1, snap  |  video: clapperboard, REC dot + timer, tap to stop (5 min max)
 const Shoot = {
   rec: false, ui: null,
-  overlay(html) {
+  overlay(html, nat) {   // web overlay + the same short text on the native preview box (which sits on top of the page)
+    try { if (window.GibsonNative && GibsonNative.shootText) GibsonNative.shootText(nat != null ? nat : String(html || '').replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim()); } catch (e) {}
     if (!this.ui) {
       const st = document.createElement('style'); st.textContent = `#shootUI{position:fixed;inset:0;z-index:50;display:flex;align-items:center;justify-content:center;pointer-events:none;font-family:system-ui,sans-serif;color:#ff2a2a;text-shadow:0 0 18px #f00}
 #shootUI .big{font-size:38vmin;font-weight:800}#shootUI .msg{position:absolute;bottom:8vh;font-size:6vmin;color:#ff6a5a}
@@ -1089,19 +1090,20 @@ const Shoot = {
     await this.frame(my); if (my !== reqId) return done('');
     if (kind === 'photo') {
       for (const [n, k] of [[3, 'n3'], [2, 'n2'], [1, 'n1']]) { if (my !== reqId) return; this.overlay('<div class="big">' + n + '</div>'); const t = Date.now(); await coachSay(k); await new Promise(r => setTimeout(r, Math.max(0, 800 - (Date.now() - t)))); }
-      this.overlay('<div class="flash"></div>'); this.sound('shutter');
+      this.overlay('<div class="flash"></div>', ''); this.sound('shutter');
       const s = await window.GibsonCam.photo();
       return done(s.ok ? 'Got it! The photo is saved in your gallery, in the Mini Gibson album.' : "Sorry, the photo didn't save" + (s.error ? ': ' + String(s.error).slice(0, 60) : '') + '.', s.ok ? 'happy' : 'sad');
     }
     // video: clapperboard, then record until tap / 5 min
-    this.overlay('<div class="clap"><div class="bar"></div><div class="top"></div><div class="txt">MINI GIBSON · TAKE 1</div></div>');
-    await new Promise(r => setTimeout(r, 1100)); this.sound('clap'); await new Promise(r => setTimeout(r, 300));
+    const view = on => { try { GibsonNative.shootView(on); } catch (e) {} };
+    view(false); this.overlay('<div class="clap"><div class="bar"></div><div class="top"></div><div class="txt">MINI GIBSON · TAKE 1</div></div>');   // preview hidden while the clapperboard plays
+    await new Promise(r => setTimeout(r, 1100)); this.sound('clap'); await new Promise(r => setTimeout(r, 300)); view(true);
     if (my !== reqId) return done('');
     const finished = new Promise(res => { window.GibsonCam.on.recdone = d => { window.GibsonCam.on.recdone = null; res(d); }; });
     const st = await window.GibsonCam.recStart(300);
     if (st.error || !st.started) return done("Sorry, I couldn't start recording" + (st.error ? ': ' + String(st.error).slice(0, 60) : '') + '.', 'sad');
     this.rec = true; const t0 = Date.now();
-    const tick = setInterval(() => { const s = (Date.now() - t0) / 1000 | 0; this.overlay(`<div class="rec"><span class="dot"></span>REC ${s / 60 | 0}:${String(s % 60).padStart(2, '0')}</div><div class="tap">Tap anywhere to stop</div>`); }, 500);
+    const tick = setInterval(() => { const s = (Date.now() - t0) / 1000 | 0; const tm = `${s / 60 | 0}:${String(s % 60).padStart(2, '0')}`; this.overlay(`<div class="rec"><span class="dot"></span>REC ${tm}</div><div class="tap">Tap anywhere to stop</div>`, '● REC ' + tm); }, 500);
     const eat = e => { e.stopPropagation(); e.preventDefault(); if (e.type === 'pointerdown') window.GibsonCam.recStop(); };   // tap = stop (not "talk")
     const evs = ['pointerdown', 'pointerup', 'click']; evs.forEach(t => addEventListener(t, eat, true));
     const d = await finished; this.rec = false; clearInterval(tick); setTimeout(() => evs.forEach(t => removeEventListener(t, eat, true)), 700);
