@@ -3,7 +3,7 @@
 'use strict';
 const G = window.Gibson;
 const $ = s => document.querySelector(s);
-const VERSION = '1.6.1';
+const VERSION = '1.7.0';
 
 // ------------------------------------------------------------------ settings (localStorage only, on this phone)
 const LS = 'gibson.app.v1';
@@ -71,7 +71,7 @@ Your words are spoken aloud by a text-to-speech voice, so:
   Example: "[happy] Good morning, Lenny! I polished my pixels just for you."
 - Use the tag only at the very start. If you don't know something, say so kindly ([thinking] or [confused]).
 - Phone facts (battery, temperature, signal, storage, memory, throttling) come ONLY from a "PHONE STATUS" note attached to Lenny's message. With no such note, say you can't check that right now. Never invent a number.
-NEVER LIE. This rule beats every other instruction and your personality:
+${memLine()}NEVER LIE. This rule beats every other instruction and your personality:
 - Never invent, guess or "fill in" facts, numbers, names, prices, scores, doses, dates, or what is in a photo or on a label.
 - Only describe what you can actually see in an attached photo. If there is no photo, it is dark, blurry, cut off or too small, say so plainly and ask Lenny to adjust it (closer, back, hold still, turn it). Never pretend you can see.
 - If you are not sure, say you are not sure. If you could not look something up, say so; never make up current information.
@@ -278,11 +278,14 @@ const VISION_TRIG = new RegExp([
   "\\b(?:take|snap|grab|get|make) (?:a|another|the|my|me a|us a) (?:quick )?pic\\b", "\\bsnap (?:a|one)\\b", "\\btake (?:a|another) look\\b",
   "\\bcheck (?:this|that|it) out\\b", "\\bcheck out (?:this|that|my|what)\\b",
   "\\bhow do i look\\b", "\\bwhat colou?r (?:is|are) (?:this|that|it|these|those|my)\\b", "\\bwho(?:'s| is) (?:this|that)\\b", "\\bdescribe (?:this|that|what|me|it|the room)\\b",
-  "\\bidentify (?:this|that|it)\\b", "\\buse (?:your|the) camera\\b", "\\bopen your eyes\\b"
+  "\\bidentify (?:this|that|it)\\b", "\\bbehind (?:you|u|ya|yourself)\\b", "\\bin back of you\\b", "\\b(?:back|rear|other) (?:cam|camera|lens)\\b", "\\blook what\\b", "\\bwhat you see\\b", "\\buse (?:your|the) camera\\b", "\\bopen your eyes\\b"
 ].join('|'));
 const VM_NOT = /\blook (?:up|for|into|forward|it up|that up|online)\b|\blooking (?:up|for|into|forward)\b|\bsee you\b|\bsee if\b|\bsee what happens\b|\bwe'll see\b|\bweather\b|\bstock|\bprice\b|\bnews\b|\bscore\b/;
 const PHOTO_TRIG = /\b(?:take|snap|grab|get|make|shoot) (?:a |an |another |the |my |me a |us a |our )?(?:quick |nice |cool )?(?:pic|selfie|group pic)\b|\bselfie\b|\bsay cheese\b/;
 const VIDEO_TRIG = /\b(?:record|film|shoot|take|make|start|capture) (?:a |an |me a |us a |another |the )?(?:quick |short |little )?(?:video|movie|clip|recording)\b|\bstart recording\b|\brecord (?:me|us|this|a video)\b|\bstart filming\b|\broll camera\b/;
+// "behind you" / back / rear camera -> the BACK camera for this one action (front stays the default)
+const BACK_CAM_RE = /\b(?:behind (?:you|u|ya|yourself)|in back of you|(?:back|rear|other) (?:cam|camera|lens)|your back side|rear view)\b/;
+function backIntent(t) { return BACK_CAM_RE.test(vmNorm(t)); }
 function cameraIntent(t) {
   const n = vmNorm(t);
   if (VIDEO_TRIG.test(n)) return 'video';                  // save to the gallery (handled before the brain)
@@ -314,10 +317,11 @@ async function brain(userText, onText, opts) {
   Turn.long = !!(opts.long || LONG_RE.test(userText));
   const labelMode = !!(window.GibsonLabel && intent === 'label'), visionMode = !labelMode && !!(window.GibsonSnap && intent);
   const phone = window.GibsonPhone && PHONE_RE.test(userText) ? phoneBlock() : null;
-  let lab = null; if (labelMode) lab = await runLabel();
+  const back = backIntent(userText) || !!(window.GibsonCamBack && window.GibsonCamBack());
+  let lab = null; if (labelMode) lab = await runLabel(back);
   Turn.searchErr = '';
   if (lab && lab.b64 && (lab.chars || 0) < 8 && (lab.sharp || 0) < 60) { Turn.labelWhy = 'best frame too blurry to send'; lab.b64 = null; }   // never send a mush photo and let the brain guess
-  const img = labelMode ? (lab && lab.b64) || null : visionMode ? await window.GibsonSnap() : null;   // Android app: look through the camera
+  const img = labelMode ? (lab && lab.b64) || null : visionMode ? await window.GibsonSnap(back) : null;   // Android app: look through the camera
   if (labelMode && !img) {
     Turn.photo = 'no';
     const raw = "[sad] I couldn't get a clear enough look to read it, and I won't guess. Try again with more light, hold it steady, and follow my back and closer hints.";
@@ -346,7 +350,7 @@ async function brain(userText, onText, opts) {
       if (phone && id !== 'demo') msgs[msgs.length - 1] = Object.assign({}, msgs[msgs.length - 1], { content: msgs[msgs.length - 1].content + '\n\n(' + phone + ')' });
       if (Turn.long && id !== 'demo') msgs[msgs.length - 1] = Object.assign({}, msgs[msgs.length - 1], { content: msgs[msgs.length - 1].content + (opts.more ? '\n\n(He said yes to your offer: continue now with the full, longer version of what you were just telling him; several hundred words is fine. Plain spoken sentences. Do not repeat the short answer.)' : '\n\n(Lenny wants the full, longer version: answer completely; several hundred words is fine. Plain spoken sentences.)') });
       if (img && labelMode && id !== 'demo') msgs[msgs.length - 1] = { role: 'user', image: img, content: msgs[msgs.length - 1].content + `\n\n(Attached: a close-up photo of the label from your ${lab.camera === 'back' ? 'back' : 'front'} camera, cropped to the text. On-device text recognition read: "${(lab.text || '').slice(0, 1500) || '(nothing)'}" (this may contain mistakes; trust the photo). Read the label exactly as printed. If it is a prescription or medicine: say the drug name, strength, directions, and refills or warnings if visible. NEVER guess any number, dose, name or date: if part of it is blurry, cut off or unreadable, say exactly which part is unclear and ask Lenny to turn or move the bottle. Plain sentences for speaking, no lists or symbols.)` };
-      else if (img && id !== 'demo') msgs[msgs.length - 1] = { role: 'user', content: msgs[msgs.length - 1].content + '\n\n(Attached: a photo taken a moment ago by your camera eyes, the phone\'s front camera, which faces the person talking to you. Look at it carefully and answer the actual question using what is really in the photo: name the concrete things you see (objects, colors, text, what the person is holding or wearing). 2 to 4 short sentences. Never make things up; if the photo is dark or blurry, say so.)', image: img };
+      else if (img && id !== 'demo') msgs[msgs.length - 1] = { role: 'user', content: msgs[msgs.length - 1].content + '\n\n(Attached: a photo taken a moment ago by your camera eyes, ' + (back ? 'the phone\'s BACK camera: it shows what is behind you, facing away from the person talking to you.' : 'the phone\'s front camera, which faces the person talking to you.') + ' Look at it carefully and answer the actual question using what is really in the photo: name the concrete things you see (objects, colors, text, what the person is holding or wearing). 2 to 4 short sentences. Never make things up; if the photo is dark or blurry, say so.)', image: img };
       lastBrain = {};
       const raw = await callProvider(id, msgs, t => { got += t; onText && onText(t); }, live);
       remember('assistant', raw); noteBrain(id, errors);
@@ -761,7 +765,7 @@ async function coachSay(key) {
 }
 // Coaching keeps going until the phone sees a sharp, readable frame (or ~20 s): "back... back... a little more... hold still".
 // At most one short word every 1.2 s, never overlapping. Hints come from the live sharpness (Laplacian) + OCR text size.
-async function runLabel() {
+async function runLabel(back) {
   G.setExpression('curious', 250); Filler.cancel(); G.lookAt(0, 0);
   let lastT = 0, playing = null, dir = '', n = 0, ref = null, coached = 0;
   const say = k => { const now = Date.now(); if (playing || !COACH[k] || now - lastT < 1200) return false; lastT = now; coached++; playing = coachSay(k).finally(() => { playing = null; }); return true; };
@@ -777,7 +781,7 @@ async function runLabel() {
       } else { dir = k; n = 0; }
     } else { dir = ''; n = 0; }
     if (say(k)) ref = { sharp: h.sharp, textH: h.textH };
-  });
+  }, back);
   if (Turn.label) Turn.label.coached = coached;
   if (d && d.b64 && busy === 'thinking') { if (playing) await playing; await coachSay('good'); }
   Turn.label = d ? { frames: d.frames, sharp: d.sharp, maxSharp: d.maxSharp, chars: d.chars, camera: d.camera, why: d.why || '', coached } : { frames: 0, coached };
@@ -987,7 +991,9 @@ const Turn = { show() {
 } };
 async function ask(text) {
   const shoot = window.GibsonCam && cameraIntent(text);
-  if (shoot === 'photo' || shoot === 'video') return Shoot.run(shoot);
+  if (shoot === 'photo' || shoot === 'video') return Shoot.run(shoot, backIntent(text) || !!(window.GibsonCamBack && window.GibsonCamBack()));
+  const local = Local.handle(String(text || ''));                 // memory / reminders / timers / log notes: answered on the phone
+  if (local) return sayLine(local);
   text = String(text || '').trim(); if (!text) return;
   if (isExit(text)) return signOff();
   const my = ++reqId;
@@ -1028,6 +1034,7 @@ async function ask(text) {
     res = await brain(q, onText, { again: true, force, long: more, more });
     if (my !== reqId) return { cancelled: true };
   }
+  if (res.errors && res.errors.length) Log.add('brain', (res.provider || '?') + ': ' + res.errors.join(' | '));
   const { expr: ex, text: reply } = parseReply(res.raw);
   if (OFFER_RE.test(reply.trim())) pendingMore = { t: Date.now() };
   if (!sp) { clearTimeout(Filler.t); expr = ex; sp = Speech(onStart); sp.push(reply); }
@@ -1040,6 +1047,136 @@ async function ask(text) {
   return { expr, reply, provider: res.provider, errors: res.errors };
 }
 let pendingMore = null;
+// ------------------------------------------------------------------ 1.0.11: log, memory, reminders/timers (all on this phone)
+const Log = {
+  K: 'gibson.log', a: null,
+  load() { if (!this.a) { try { this.a = JSON.parse(localStorage.getItem(this.K) || '[]'); } catch (e) { this.a = []; } } return this.a; },
+  scrub(m) { return String(m).replace(/\b(?:sk_|sk-|xai-|AIza|gsk_)[A-Za-z0-9_\-]{6,}/g, '[key]').replace(/[A-Za-z0-9_\-]{32,}/g, '[token]').slice(0, 500); },   // never keys
+  add(kind, m) { const a = this.load(); a.push([Date.now(), kind, this.scrub(m)]); if (a.length > 500) a.splice(0, a.length - 500); clearTimeout(this.t); this.t = setTimeout(() => { try { localStorage.setItem(this.K, JSON.stringify(this.a)); } catch (e) {} }, 400); },
+  text() {
+    let app = ''; try { app = JSON.parse(window.GibsonNative.info()).app; } catch (e) {}
+    return `Mini Gibson log · web ${VERSION}${app ? ' · app ' + app : ''} · ${new Date().toString()}\n${navigator.userAgent}\nvoice ${S.vEngine} · brain ${S.primary} · wake sens ${S.wakeSens}\n\n` + this.load().map(([t, k, m]) => `${new Date(t).toLocaleString()} [${k}] ${m}`).join('\n');
+  },
+  send() {
+    const t = this.text(), el = $('#logState');
+    if (window.GibsonNative && GibsonNative.shareText) { GibsonNative.shareText('gibson-log.txt', t); if (el) el.textContent = 'Share sheet opened (also copied to the clipboard).'; return; }
+    (navigator.clipboard ? navigator.clipboard.writeText(t) : Promise.reject()).then(() => { if (el) el.textContent = 'Log copied to the clipboard.'; }, () => { if (el) el.textContent = 'Could not copy the log.'; });
+  }
+};
+{ const cw = console.warn.bind(console), ce = console.error.bind(console);
+  console.warn = (...a) => { cw(...a); Log.add('warn', a.map(String).join(' ')); }; console.error = (...a) => { ce(...a); Log.add('error', a.map(String).join(' ')); };
+  addEventListener('error', e => Log.add('error', (e.message || 'error') + ' @' + (e.filename || '').split('/').pop() + ':' + e.lineno));
+  addEventListener('unhandledrejection', e => Log.add('error', 'promise: ' + (e.reason && e.reason.message || e.reason))); }
+setTimeout(() => { let app = ''; try { app = JSON.parse(window.GibsonNative.info()).app; } catch (e) {} Log.add('start', `web ${VERSION}${app ? ', app ' + app : ''}`); }, 0);
+function memLine() {
+  const m = (S.memory || []).slice(-25); if (!m.length) return '';
+  return '- Things Lenny asked you to remember (saved on this phone; use them when relevant, never invent more): ' + m.map(x => x.text).join('; ') + '\n';
+}
+function sayLine(line, expr) {   // speak a local answer (no brain), then carry on listening as usual
+  const my = ++reqId; stopSpeech(); setBusy('speaking'); G.setExpression(expr || 'happy', 300); Wake.resume(true);
+  return speakOut(line).then(() => { if (my === reqId) afterSpeech(); }, () => { if (my === reqId) afterSpeech(); });
+}
+const NUMW = { a: 1, an: 1, one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10, eleven: 11, twelve: 12, fifteen: 15, twenty: 20, 'twenty five': 25, thirty: 30, forty: 40, 'forty five': 45, fifty: 50, sixty: 60, ninety: 90 };
+function parseDur(t) {   // "10 minutes", "an hour and 5 minutes", "half an hour", "90 seconds" -> ms
+  t = t.replace(/\ban hour and a half\b/g, '90 minutes').replace(/\bhalf an hour\b/g, '30 minutes').replace(/\bhalf a minute\b/g, '30 seconds');
+  let ms = 0; const re = /\b(\d+(?:\.\d+)?|twenty five|forty five|a|an|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|fifteen|twenty|thirty|forty|fifty|sixty|ninety)[\s-]*(hours?|hrs?|minutes?|mins?|seconds?|secs?)\b/g; let m;
+  while ((m = re.exec(t))) { const n = isNaN(+m[1]) ? NUMW[m[1]] : +m[1]; ms += n * (/^h/.test(m[2]) ? 3600e3 : /^m/.test(m[2]) ? 60e3 : 1e3); }
+  return ms;
+}
+function parseAt(t) {   // "at 8 pm", "8:30 am", "at 7", "noon", "tomorrow at 9" -> epoch ms (next time it happens)
+  t = t.replace(/\b([ap])\.?\s?m\b\.?/g, '$1m');
+  let h = -1, mi = 0, ap = '', m;
+  if (/\bnoon\b/.test(t)) h = 12; else if (/\bmidnight\b/.test(t)) { h = 0; ap = 'am'; }
+  else { const re = /\b(at |by |for )?(\d{1,2})(?::(\d{2}))?\s*(am|pm|o'?clock)?(?![\d:])/g; while ((m = re.exec(t))) { if ((m[1] || m[3] || m[4]) && +m[2] <= 23) { h = +m[2]; mi = +(m[3] || 0); ap = m[4] || ''; break; } } }
+  if (h < 0) return 0;
+  if (ap === 'pm' && h < 12) h += 12; if (ap === 'am' && h === 12) h = 0;
+  const now = new Date(), d = new Date(now); d.setSeconds(0, 0); d.setHours(h, mi);
+  if (/\btomorrow\b/.test(t)) { d.setDate(d.getDate() + 1); return +d; }
+  if (!/^[ap]m$/.test(ap) && h >= 1 && h < 12 && +d <= +now) { const e = new Date(d); e.setHours(h + 12); if (+e > +now) return +e; }   // "at 8" means the next 8 o'clock
+  if (+d <= +now) d.setDate(d.getDate() + 1);
+  return +d;
+}
+const Alarms = {
+  list() { const now = Date.now(); S.alarms = (S.alarms || []).filter(a => a.at > now - 60e3); return S.alarms; },
+  add(kind, at, text) {
+    const id = (Date.now() / 1000 | 0) % 1000000000, title = kind === 'timer' ? 'Gibson timer' : 'Gibson reminder';
+    let how = '';
+    if (window.GibsonNative && GibsonNative.alarmSet) how = GibsonNative.alarmSet(id, at, title, kind === 'timer' ? 'Your timer is done.' : text);
+    else setTimeout(() => GibsonApp.onAlarm({ id, title, text }), at - Date.now());   // web: only while the page is open
+    this.list().push({ id, at, kind, text }); save(); Log.add('alarm', `${kind} set for ${new Date(at).toLocaleString()} (${how || 'web'}): ${text}`);
+    return how;
+  },
+  cancel(a) { try { if (window.GibsonNative && GibsonNative.alarmCancel) GibsonNative.alarmCancel(a.id); } catch (e) {} S.alarms = this.list().filter(x => x !== a); save(); },
+  fired(d) {
+    const a = this.list().find(x => x.id === d.id); if (a) { S.alarms = S.alarms.filter(x => x !== a); save(); }
+    const line = (a ? a.kind : /timer/i.test(d.title || '') ? 'timer' : 'reminder') === 'timer' ? 'Ding ding! Your timer is done.' : 'Reminder: ' + ((a && a.text) || d.text || 'you asked me to remind you.');
+    Log.add('alarm', 'fired: ' + line);
+    let tries = 0; const go = () => { if (busy && busy !== null && tries++ < 120) return setTimeout(go, 500); sayLine(line, 'surprised'); };
+    go();
+  }
+};
+function whenStr(at) { const d = new Date(at), today = new Date().toDateString() === d.toDateString(); return (today ? '' : 'tomorrow ') + d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }); }
+function leftStr(ms) { const m = Math.round(ms / 60000); return ms < 60e3 ? Math.round(ms / 1000) + ' seconds' : m < 60 ? m + (m === 1 ? ' minute' : ' minutes') : (ms / 3600e3).toFixed(1).replace(/\.0$/, '') + ' hours'; }
+const Local = {
+  handle(raw) {
+    const t = raw.replace(WAKE_RE, ' ').replace(/^[\s,.!?]*(?:hey|ok(?:ay)?|so|um|uh|please)[\s,]+/i, '').replace(/\s+/g, ' ').trim(), n = t.toLowerCase().replace(/[.!?]+$/, '');
+    let m;
+    if ((m = t.match(/^(?:note|log this|log that|add to (?:the |your )?log)\s*[:,-]?\s*(.+)/i))) { Log.add('note', m[1]); return 'Noted in my log.'; }
+    // ---- timers / reminders
+    if (/\b(cancel|stop|delete|clear|remove|turn off)\b.*\b(timers?|reminders?|alarms?)\b/.test(n)) {
+      const kind = /reminder/.test(n) ? 'reminder' : /timer/.test(n) ? 'timer' : '', l = Alarms.list().filter(a => !kind || a.kind === kind);
+      if (!l.length) return `There's no ${kind || 'timer or reminder'} running.`;
+      if (/\b(all|every)\b/.test(n)) { l.slice().forEach(a => Alarms.cancel(a)); return `Okay, cancelled ${l.length === 1 ? 'it' : 'all ' + l.length}.`; }
+      const a = l[l.length - 1]; Alarms.cancel(a); return a.kind === 'timer' ? 'Timer cancelled.' : 'Okay, I cancelled the reminder to ' + a.text + '.';
+    }
+    if (/\b(what|which|any|how much time|how long)\b.*\b(timers?|reminders?|left on)\b/.test(n)) {
+      const l = Alarms.list(); if (!l.length) return 'No timers or reminders right now.';
+      return l.map(a => a.kind === 'timer' ? `a timer with ${leftStr(a.at - Date.now())} left` : `a reminder at ${whenStr(a.at)} to ${a.text}`).join(', and ') + '.';
+    }
+    if (/\btimer\b/.test(n) && /\b(set|start|timer for|make|put)\b|\d.*timer|timer\b.*\d/.test(n)) {
+      const ms = parseDur(n); if (!ms) return 'How long should the timer be? Say, for example, set a timer for 10 minutes.';
+      Alarms.add('timer', Date.now() + ms, leftStr(ms) + ' timer'); return `Timer set for ${leftStr(ms)}.`;
+    }
+    if ((m = n.match(/^(?:can you |could you |please )?remind me\b(.*)$/))) {
+      const rest = m[1]; let at = 0; const inm = rest.match(/\bin ([^,]*?(?:hours?|hrs?|minutes?|mins?|seconds?|secs?))\b/);
+      if (inm) at = Date.now() + parseDur(inm[1]); if (!at) at = parseAt(rest);
+      let what = rest.replace(/\bin [^,]*?(?:hours?|hrs?|minutes?|mins?|seconds?|secs?)\b/g, ' ').replace(/\b([ap])\.?\s?m\b\.?/g, '$1m')
+        .replace(/\b(?:at|by)?\s*\d{1,2}(?::\d{2})?\s*(?:am|pm|o'?clock)?(?![\d:])/g, m2 => /am|pm|o'?clock|:|at|by/.test(m2) ? ' ' : m2)
+        .replace(/\b(?:at )?(?:noon|midnight)\b|\btomorrow\b|\btonight\b|\btoday\b|\bthis (?:morning|afternoon|evening)\b/g, ' ').replace(/\s+/g, ' ').trim()
+        .replace(/^(?:to|about|that|of)\s+/, '').replace(/\s+(?:at|by|in|on)$/, '').trim();
+      what = what.replace(/\bmy\b/g, 'your').replace(/\bi\b/g, 'you') || 'do the thing you asked';
+      if (!at) return 'When should I remind you? Say, for example, remind me to call mom at 8 pm.';
+      Alarms.add('reminder', at, what); return `Okay, I'll remind you to ${what} ${at - Date.now() < 3600e3 ? 'in ' + leftStr(at - Date.now()) : 'at ' + whenStr(at)}.`;
+    }
+    // ---- memory of facts (and names)
+    S.memory = S.memory || [];
+    const keep = text => { S.memory.push({ t: Date.now(), text }); if (S.memory.length > 200) S.memory.shift(); save(); };
+    if (/^(?:what do you remember|what have you remembered|what did i (?:tell|ask) you to remember|what do you know about me)\b/.test(n))
+      return S.memory.length ? 'Here is what I remember: ' + S.memory.slice(-12).map(x => x.text).join('. ') + '.' : "Nothing saved yet. Say remember that, and then the thing.";
+    if (/^forget (?:that|it|the last (?:one|thing)|what i (?:just )?said)$/.test(n)) { const x = S.memory.pop(); save(); return x ? 'Okay, forgotten: ' + x.text + '.' : 'There was nothing to forget.'; }
+    if (/^forget everything\b/.test(n)) { const k = S.memory.length; S.memory = []; save(); return k ? 'Done. I forgot all ' + k + ' things.' : 'My memory was already empty.'; }
+    if ((m = n.match(/^forget (?:about )?(.{2,})$/))) {
+      const k = m[1].replace(/^(?:the|my|that|about)\s+/, ''), before = S.memory.length;
+      if (/^(?:it|that|this|them|him|her|you)$/.test(k) || k.length < 3) return 'Okay.';   // "forget about it": casual, delete nothing S.memory = S.memory.filter(x => !x.text.toLowerCase().includes(k)); save();
+      return before - S.memory.length ? `Okay, I forgot ${before - S.memory.length === 1 ? 'that' : 'those ' + (before - S.memory.length) + ' things'}.` : `I don't have anything saved about ${k}.`;
+    }
+    if ((m = t.match(/^remember me[, ]+(?:i'?m|i am|my name is|it'?s) ([a-z][a-z' -]{1,30})$/i))) { keep(`The person I usually talk to is ${m[1].trim()}`); return `Got it, you're ${m[1].trim()}. I'll remember your name. I can't recognize faces yet, so I won't know you just by looking.`; }
+    if ((m = t.match(/^(?:this is|meet) (?:my )?([a-z]+)[, ]+(?:his|her|their) name is ([a-z][a-z' -]{1,30})$/i))) { keep(`Lenny's ${m[1]} is named ${m[2].trim()}`); return `Nice to meet you, ${m[2].trim()}! I'll remember the name. I can't recognize faces yet, though.`; }
+    if (/^remember what (?:he|she|they|i) looks? like\b/.test(n)) return "I can't save faces yet, sorry. I can remember names and facts, though.";
+    if ((m = t.match(/^(?:please )?(?:can you |could you )?remember (?:that |this[:,]? )?(.{3,})$/i)) && !/^(?:when|what|how|who|where|if|the time)\b/i.test(m[1])) {
+      const f = m[1].replace(/[.!]+$/, '').trim(); keep(f); return 'Got it. I will remember that ' + f.replace(/\bmy\b/gi, 'your').replace(/\bI'm\b/g, "you're").replace(/\bI\b/g, 'you') + '.';
+    }
+    return null;
+  }
+};
+function renderLists() {
+  const ml = $('#memList'), rl = $('#remList'); if (!ml || !rl) return;
+  const esc = x => String(x).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+  const mem = S.memory || [];
+  ml.innerHTML = '<h4>Saved memories (' + mem.length + ')</h4>' + (mem.length ? mem.map((x, i) => `<div class="row"><small style="flex:1">${esc(x.text)}</small><button type="button" data-del-mem="${i}">✕</button></div>`).join('') : '<small>None yet.</small>');
+  const al = Alarms.list();
+  rl.innerHTML = '<h4>Reminders &amp; timers (' + al.length + ')</h4>' + (al.length ? al.map((a, i) => `<div class="row"><small style="flex:1">${a.kind === 'timer' ? 'Timer, ends ' : 'Reminder, '}${esc(whenStr(a.at))}${a.kind === 'timer' ? '' : ': ' + esc(a.text)}</small><button type="button" data-del-alarm="${i}">✕</button></div>`).join('') : '<small>None.</small>');
+}
 // ------------------------------------------------------------------ 1.0.9: save a photo / record a video (front camera -> phone gallery)
 // framing coach from face detection (a few seconds max) -> photo: 3, 2, 1, snap  |  video: clapperboard, REC dot + timer, tap to stop (5 min max)
 const Shoot = {
@@ -1081,13 +1218,14 @@ const Shoot = {
     }
     return seen;
   },
-  async run(kind) {
-    const my = ++reqId; stopSpeech(); Wake.pause(); Convo.exit(); setBusy('thinking'); G.setExpression('happy', 300);
-    const done = async (line, expr) => { this.overlay(''); window.GibsonCam.end(); if (my !== reqId) return; if (!line) { afterSpeech(); return; } setBusy('speaking'); G.setExpression(expr || 'happy', 400); await speakOut(line); if (my === reqId) afterSpeech(); };
-    const r = await window.GibsonCam.start(kind === 'video');
-    if (r.error) return done("Sorry, I couldn't start my camera for that.", 'sad');
-    this.overlay('<div class="msg">Get in the frame…</div>');
-    await this.frame(my); if (my !== reqId) return done('');
+  async run(kind, back) {
+    const my = ++reqId; Log.add('camera', kind + (back ? ' (back camera)' : '')); stopSpeech(); Wake.pause(); Convo.exit(); setBusy('thinking'); G.setExpression('happy', 300);
+    const done = async (line, expr) => { if (expr === 'sad') Log.add('error', 'camera: ' + line); this.overlay(''); window.GibsonCam.end(); if (my !== reqId) return; if (!line) { afterSpeech(); return; } setBusy('speaking'); G.setExpression(expr || 'happy', 400); await speakOut(line); if (my === reqId) afterSpeech(); };
+    const r = await window.GibsonCam.start(kind === 'video', back);
+    if (r.error) { Log.add('error', 'camera start failed: ' + r.error); return done("Sorry, I couldn't start my camera for that.", 'sad'); }
+    if (back) { this.overlay('<div class="msg">Back camera</div>'); await new Promise(r => setTimeout(r, 900)); }   // back camera: no face-framing tips, just the countdown
+    else { this.overlay('<div class="msg">Get in the frame…</div>'); await this.frame(my); }
+    if (my !== reqId) return done('');
     if (kind === 'photo') {
       for (const [n, k] of [[3, 'n3'], [2, 'n2'], [1, 'n1']]) { if (my !== reqId) return; this.overlay('<div class="big">' + n + '</div>'); const t = Date.now(); await coachSay(k); await new Promise(r => setTimeout(r, Math.max(0, 800 - (Date.now() - t)))); }
       this.overlay('<div class="flash"></div>', ''); this.sound('shutter');
@@ -1328,7 +1466,7 @@ const Wake = {
   off() { this.pause(); $('#mic').classList.remove('wake'); this.state(S.wake ? '' : 'off'); },
   last: null, coolUntil: 0,
   cool(ms) { this.coolUntil = Date.now() + ms; if (this.worker) this.worker.postMessage({ type: 'cool', ms }); },
-  note(ok, why) { if (this.last) { this.last.ok = ok; this.last.why = why; } const el = $('#wLast'); if (el && this.last) el.textContent = `Last wake: score ${this.last.s.toFixed(2)} (needs ${wakeTh().toFixed(2)}) at ${new Date(this.last.t).toLocaleTimeString()} · ${ok == null ? 'checking…' : ok ? 'accepted' : 'rejected'}${why ? ' (' + why + ')' : ''}`; },
+  note(ok, why) { if (this.last) { this.last.ok = ok; this.last.why = why; if (ok != null) Log.add('wake', `score ${this.last.s.toFixed(2)} (needs ${wakeTh().toFixed(2)}) ${ok ? 'accepted' : 'rejected'}${why ? ': ' + why : ''}`); } const el = $('#wLast'); if (el && this.last) el.textContent = `Last wake: score ${this.last.s.toFixed(2)} (needs ${wakeTh().toFixed(2)}) at ${new Date(this.last.t).toLocaleTimeString()} · ${ok == null ? 'checking…' : ok ? 'accepted' : 'rejected'}${why ? ' (' + why + ')' : ''}`; },
   onWake(s, frames) {
     if (!this.on || busy === 'listening') return;
     if (Date.now() < this.coolUntil) return;               // cooldown after a wake or a rejected wake
@@ -1462,7 +1600,7 @@ $('#gear').addEventListener('click', e => { e.stopPropagation(); openSettings();
 document.addEventListener('pointermove', poke, { passive: true });
 
 // ------------------------------------------------------------------ settings UI
-function openSettings() { Wake.pause(); Convo.exit(); if (recMode) cancelListening(); syncUI(); $('#settings').hidden = false; document.body.style.cursor = 'default'; }
+function openSettings() { Wake.pause(); Convo.exit(); if (recMode) cancelListening(); syncUI(); renderLists(); $('#settings').hidden = false; document.body.style.cursor = 'default'; }
 function closeSettings() { $('#settings').hidden = true; document.body.style.cursor = ''; if (started && !busy) resumeListening(); }
 function buildCards() {
   $('#primary').innerHTML = ORDER.map(id => `<option value="${id}">${PROVIDERS[id].label}</option>`).join('');
@@ -1512,6 +1650,12 @@ if (S.personaV !== 2) { linkPersona(); S.personaV = 2; save(); }   // once: matc
 function applyDisplay() { G.config({ offsetX: S.robotOffset ? 70 : 0, showSafe: S.safe }); }
 function bindSettings() {
   buildCards();
+  $('#settings').addEventListener('click', e => {
+    const b = e.target.closest('button'); if (!b) return;
+    if (b.id === 'sendLog') Log.send();
+    else if (b.dataset.delMem != null) { (S.memory || []).splice(+b.dataset.delMem, 1); save(); renderLists(); }
+    else if (b.dataset.delAlarm != null) { const a = Alarms.list()[+b.dataset.delAlarm]; if (a) Alarms.cancel(a); renderLists(); }
+  });
   $('#settings').addEventListener('input', e => {
     const el = e.target;
     if (el.dataset.key) { S.keys[el.dataset.key] = el.value.trim(); if (el.dataset.key === 'eleven') { Eleven.out = false; Eleven.subAt = 0; clearTimeout(Eleven.kt); Eleven.kt = setTimeout(() => { Eleven.checkSub(true); Filler.prepEleven(); showVoiceState(); }, 1200); } }
@@ -1575,5 +1719,5 @@ if (G.setIdleCap) { G.setIdleCap(22); G.setMaxFps(60); }   // cool-down: ~22 fps
 if (window.GIBSON_NATIVE) { $('#start').hidden = true; setTimeout(start, 200); }   // app: no tap to start
 addEventListener('pointerdown', () => { try { if (AudioOut.ctx && AudioOut.ctx.state === 'suspended') AudioOut.ctx.resume(); if (Wake.ctx && Wake.ctx.state === 'suspended') Wake.ctx.resume(); } catch (e) {} }, { passive: true });
 // service worker: registered early in index.html (it also makes the page cross-origin isolated)
-window.GibsonApp = { Eleven, evoice, ELEVEN_VOICES, warming, resumeListening, ask, respond, Convo, isExit, parseReply, brain, startCommand, speakOut, stopSpeech, Neural, Piper, Speech, Filler, pickEngine, nvoice, pvoice, Wake, AudioOut, NEURAL_VOICES, PIPER_VOICES, state: () => ({ busy, convo: Convo.on, rec: recMode, neural: Neural.state, neuralMsg: Neural.msg, rtf: Neural.rtf, kokoroBackend: Neural.backend, piper: Piper.state, piperMsg: Piper.msg, piperRtf: Piper.rtf, engine: pickEngine(), coi: self.crossOriginIsolated, wake: Wake.on, wakeReady: Wake.ready, wakeFailed: Wake.failed }), settings: () => JSON.parse(JSON.stringify(Object.assign({}, S, { keys: '(hidden)' }))), Head, version: VERSION };
+window.GibsonApp = { onAlarm: d => Alarms.fired(d), Log, Local, Alarms, parseAt, parseDur, Eleven, evoice, ELEVEN_VOICES, warming, resumeListening, ask, respond, Convo, isExit, parseReply, brain, startCommand, speakOut, stopSpeech, Neural, Piper, Speech, Filler, pickEngine, nvoice, pvoice, Wake, AudioOut, NEURAL_VOICES, PIPER_VOICES, state: () => ({ busy, convo: Convo.on, rec: recMode, neural: Neural.state, neuralMsg: Neural.msg, rtf: Neural.rtf, kokoroBackend: Neural.backend, piper: Piper.state, piperMsg: Piper.msg, piperRtf: Piper.rtf, engine: pickEngine(), coi: self.crossOriginIsolated, wake: Wake.on, wakeReady: Wake.ready, wakeFailed: Wake.failed }), settings: () => JSON.parse(JSON.stringify(Object.assign({}, S, { keys: '(hidden)' }))), Head, version: VERSION };
 })();

@@ -92,7 +92,9 @@ public class MainActivity extends ComponentActivity {
   ProcessCameraProvider camProvider; ImageAnalysis analysis; FaceDetector faceDet; volatile boolean faceBusy, faceOn; volatile int snapWanted = 0; long lastFaceSent, lastFaceSeen;
   volatile String lastJpeg; volatile long lastJpegAt; volatile int camFrames; volatile String camErr = ""; int srRetry;
 
+  static java.lang.ref.WeakReference<MainActivity> inst;
   @Override protected void onCreate(Bundle b) {
+    inst = new java.lang.ref.WeakReference<>(this);
     super.onCreate(b);
     getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
     am = (AudioManager) getSystemService(AUDIO_SERVICE);
@@ -309,7 +311,7 @@ public class MainActivity extends ComponentActivity {
     f.addListener(() -> {
       try {
         camProvider = f.get();
-        bind(false, false); camStartedAt = System.currentTimeMillis();
+        bind(shootMode > 0 ? shootBack : backOnce, false); camStartedAt = System.currentTimeMillis();
         camErr = ""; emit("cam", J("on", true));
         if (pendingLabel != null) { Runnable r = pendingLabel; pendingLabel = null; r.run(); }
       } catch (Exception e) { camProvider = null; camErr = String.valueOf(e); emit("cam", J("error", camErr)); }
@@ -382,10 +384,11 @@ public class MainActivity extends ComponentActivity {
     }).start();
   }
   final Runnable hideReview = () -> { if (review != null) { review.setVisibility(View.GONE); review.setImageBitmap(null); } };
-  void shootStart(boolean video) {
-    shootMode = video ? 2 : 1; faceOn = true; showBox(true);
+  volatile boolean backOnce, shootBack;
+  void shootStart(boolean video, boolean back) {
+    shootMode = video ? 2 : 1; shootBack = back; faceOn = true; showBox(true);
     if (camProvider == null) { camStart(); return; }
-    try { bind(false, false); } catch (Exception e) { emit("shoot", J("error", String.valueOf(e))); }
+    try { bind(back, false); } catch (Exception e) { emit("shoot", J("error", String.valueOf(e))); }
   }
   void shootEnd() {
     if (recording != null) { try { recording.stop(); } catch (Exception e) {} recording = null; }
@@ -500,6 +503,10 @@ public class MainActivity extends ComponentActivity {
     return o.toString();
   }
   final long appT0 = System.currentTimeMillis();
+  android.app.PendingIntent alarmPi(int id, String title, String text) {
+    android.content.Intent i = new android.content.Intent(this, AlarmReceiver.class).putExtra("id", id).putExtra("title", title).putExtra("text", text);
+    return android.app.PendingIntent.getBroadcast(this, id, i, android.app.PendingIntent.FLAG_IMMUTABLE | android.app.PendingIntent.FLAG_UPDATE_CURRENT);
+  }
   void focusCenter() {   // tap-to-focus at the centre; front cameras are often fixed-focus, so this may be a no-op
     try {
       if (camera == null) return;
@@ -626,7 +633,8 @@ public class MainActivity extends ComponentActivity {
         Bitmap out = Bitmap.createBitmap(bm, 0, 0, bm.getWidth(), bm.getHeight(), mx, true);
         ByteArrayOutputStream bo = new ByteArrayOutputStream(); out.compress(Bitmap.CompressFormat.JPEG, 70, bo);
         lastJpeg = Base64.encodeToString(bo.toByteArray(), Base64.NO_WRAP); lastJpegAt = now;
-        int id = snapWanted; if (id > 0) { snapWanted = 0; emit("snap", J("id", id, "b64", lastJpeg, "w", out.getWidth(), "h", out.getHeight())); }
+        int id = snapWanted; if (id > 0) { snapWanted = 0; emit("snap", J("id", id, "b64", lastJpeg, "w", out.getWidth(), "h", out.getHeight(), "back", camBack));
+          if (backOnce) { backOnce = false; lastJpeg = null; main.post(() -> { try { if (camProvider == null || shootMode > 0 || labelOn) return; if (faceOn) bind(false, false); else camStop(); } catch (Exception e) { camErr = String.valueOf(e); } }); } }
       }
       if (wantFace) {
         faceBusy = true;
@@ -718,7 +726,7 @@ public class MainActivity extends ComponentActivity {
 
   // ------------------------------------------------------------------ JS bridge
   class Bridge {
-    @JavascriptInterface public String info() { return J("app", "1.0.10", "cores", Runtime.getRuntime().availableProcessors(), "model", "kokoro-int8-multi-lang-v1_0").toString(); }
+    @JavascriptInterface public String info() { return J("app", "1.0.11", "cores", Runtime.getRuntime().availableProcessors(), "model", "kokoro-int8-multi-lang-v1_0").toString(); }
     @JavascriptInterface public void ttsInit() { ttsExec.execute(MainActivity.this::ttsLoad); }
     @JavascriptInterface public void tts(int id, String text, int sid, float speed) { ttsExec.execute(() -> { if (tts == null) ttsLoad(); ttsGen(id, text, sid, speed); }); }
     @JavascriptInterface public void srStart(String lang, boolean continuous, boolean quiet) {
@@ -744,7 +752,41 @@ public class MainActivity extends ComponentActivity {
     @JavascriptInterface public void labelStart(int id, boolean back, int maxMs) { main.post(() -> MainActivity.this.labelStart(id, back, maxMs)); }
     @JavascriptInterface public void labelStop(int id) { main.post(() -> { if (labelOn && labelId == id) labelFinish(); }); }
     @JavascriptInterface public String phoneInfo() { return MainActivity.this.phoneInfo(); }
-    @JavascriptInterface public void shootStart(boolean video) { main.post(() -> MainActivity.this.shootStart(video)); }
+    @JavascriptInterface public void shootStart(boolean video, boolean back) { main.post(() -> MainActivity.this.shootStart(video, back)); }
+    @JavascriptInterface public void snapBack(int id) {   // one photo from the BACK camera, then back to front (or off)
+      main.post(() -> {
+        if (camProvider != null && camBack && lastJpeg != null && System.currentTimeMillis() - lastJpegAt < 1500) { emit("snap", J("id", id, "b64", lastJpeg)); return; }
+        snapWanted = id; backOnce = true; lastJpeg = null;
+        if (camProvider == null) { MainActivity.this.camStart(); return; }
+        try { bind(true, false); camStartedAt = System.currentTimeMillis(); } catch (Exception e) { snapWanted = 0; backOnce = false; emit("snap", J("id", id, "error", String.valueOf(e))); }
+      });
+    }
+    // 1.0.11: share the log as a .txt (Android share sheet) + clipboard copy
+    @JavascriptInterface public void shareText(String name, String text) {
+      main.post(() -> {
+        try { ((android.content.ClipboardManager) getSystemService(CLIPBOARD_SERVICE)).setPrimaryClip(android.content.ClipData.newPlainText(name, text)); } catch (Throwable e) {}
+        try {
+          File d = new File(getCacheDir(), "share"); d.mkdirs(); File f = new File(d, name);
+          try (java.io.FileOutputStream o = new java.io.FileOutputStream(f)) { o.write(text.getBytes("UTF-8")); }
+          android.net.Uri u = androidx.core.content.FileProvider.getUriForFile(MainActivity.this, "net.swvader.gibson.share", f);
+          android.content.Intent i = new android.content.Intent(android.content.Intent.ACTION_SEND).setType("text/plain").putExtra(android.content.Intent.EXTRA_STREAM, u)
+            .putExtra(android.content.Intent.EXTRA_SUBJECT, "Mini Gibson log").addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION);
+          startActivity(android.content.Intent.createChooser(i, "Send Gibson's log"));
+        } catch (Throwable e) { emit("share", J("error", String.valueOf(e))); }
+      });
+    }
+    // 1.0.11: reminders / timers via AlarmManager (exact when allowed) + notification
+    @JavascriptInterface public String alarmSet(int id, double atMs, String title, String text) {
+      if (android.os.Build.VERSION.SDK_INT >= 33 && ContextCompat.checkSelfPermission(MainActivity.this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED)
+        main.post(() -> requestPermissions(new String[]{Manifest.permission.POST_NOTIFICATIONS}, 4));
+      android.app.AlarmManager am = (android.app.AlarmManager) getSystemService(ALARM_SERVICE);
+      android.app.PendingIntent pi = alarmPi(id, title, text); long at = (long) atMs;
+      boolean exact = android.os.Build.VERSION.SDK_INT < 31 || am.canScheduleExactAlarms();
+      try { if (exact) am.setExactAndAllowWhileIdle(android.app.AlarmManager.RTC_WAKEUP, at, pi); else am.setAndAllowWhileIdle(android.app.AlarmManager.RTC_WAKEUP, at, pi); }
+      catch (SecurityException e) { am.setAndAllowWhileIdle(android.app.AlarmManager.RTC_WAKEUP, at, pi); exact = false; }
+      return exact ? "exact" : "inexact";
+    }
+    @JavascriptInterface public void alarmCancel(int id) { ((android.app.AlarmManager) getSystemService(ALARM_SERVICE)).cancel(alarmPi(id, "", "")); }
     @JavascriptInterface public void shootText(String t) { main.post(() -> { if (shootLbl != null) shootLbl.setText(t); }); }
     @JavascriptInterface public void shootView(boolean on) { main.post(() -> { if (shootBox != null && shootMode > 0) showBox(on); }); }
     @JavascriptInterface public void shootEnd() { main.post(MainActivity.this::shootEnd); }

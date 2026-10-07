@@ -85,3 +85,11 @@ Head movement (ESP32) is off by default; see the `Head` object in app.js.
 ## App 1.0.10 notes
 
 - Photo/video now show a live front-camera preview in a red framed box on top of the face (native PreviewView, above the WebView) during framing, countdown and the whole recording (REC timer on it; tap it or anywhere to stop). After a photo the saved shot is shown for 3 s. (1.0.9 had no preview layer at all.)
+
+## App 1.0.11 notes
+
+- **Back camera by voice:** "what's behind you", "look behind you", "take a picture / record a video behind you", "use your back camera" use the back camera for that one look, label read, photo or video (front stays default). Settings → Phone app → Default camera: Front / Back (for a car mount). The preview box shows the back camera unmirrored; no face-framing tips on the back camera, just the countdown.
+- **Log:** last 500 entries on the phone (errors, voice fallbacks, brain errors, wake scores accepted/rejected, camera, alarms, app version, and your notes: "note: …" / "log this …"). Settings → Memory, reminders & log → Send log (Android share sheet as gibson-log.txt, also copied to the clipboard). API keys are scrubbed.
+- **Memory:** "remember that …", "what do you remember?", "forget that", "forget about X", "forget everything"; "remember me, I'm Lenny" / "this is my son, his name is X" save the names. Saved facts go into his instructions. List with delete in Settings.
+- **Reminders & timers:** "remind me to … at 8 pm / in 20 minutes / tomorrow at 9", "set a timer for 10 minutes", "what timers do I have?", "cancel the timer / all reminders". Android alarm + notification (works with the app in the background); he says it out loud if the app is open. Lost if the phone restarts.
+- Not done: face recognition (no on-device face model in the app yet) and voice "stop" while recording video (the video owns the microphone; tap to stop).

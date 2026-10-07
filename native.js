@@ -19,6 +19,8 @@
   window.__nativeEvt = (type, d) => {
     if (type === 'sr') { if (srCur) srCur._evt(d); }
     else if (type.startsWith('tts')) { if (ttsW) ttsW._evt(type, d); }
+    else if (type === 'alarm') { if (window.GibsonApp && GibsonApp.onAlarm) GibsonApp.onAlarm(d); }
+    else if (type === 'share') console.warn('[gibson] share failed: ' + d.error);
     else if (type === 'shoot' || type === 'shot' || type === 'rec' || type === 'recdone') { const f = window.GibsonCam && GibsonCam.on[type]; if (f) f(d); }
     else if (type === 'face') {
       window.GibsonFace = d.none ? null : Object.assign({ t: Date.now() }, d);
@@ -153,22 +155,23 @@
     const once = (type, ms) => new Promise(res => { const to = setTimeout(() => { GibsonCam.on[type] = null; res({ error: 'timeout' }); }, ms); GibsonCam.on[type] = d => { clearTimeout(to); GibsonCam.on[type] = null; res(d); }; });
     window.GibsonCam = {
       on: {},
-      start(video) { clearTimeout(camOffT); window.GibsonFace = null; const p = once('shoot', 8000); N.shootStart(!!video); return p; },
+      start(video, back) { clearTimeout(camOffT); window.GibsonFace = null; const p = once('shoot', 8000); N.shootStart(!!video, !!back); return p; },
       photo() { const p = once('shot', 10000); N.takePhoto(++shotId); return p; },
       recStart(maxSec) { const p = once('rec', 8000); N.recStart(++shotId, maxSec); return p; },
       recStop() { N.recStop(); },
       end() { N.shootEnd(); if (opt.faceTrack) setTimeout(() => N.camStart(), 400); }
     };
   }
-  window.GibsonSnap = () => new Promise(res => {
-    const id = ++snapId; snaps.set(id, res); N.snap(id);
+  window.GibsonCamBack = () => opt.camDefault === 'back';   // Settings: default camera (back = phone outside the case, e.g. car mount)
+  window.GibsonSnap = back => new Promise(res => {
+    const id = ++snapId; snaps.set(id, res); if (back && N.snapBack) N.snapBack(id); else N.snap(id);
     setTimeout(() => { if (snaps.has(id)) { snaps.delete(id); console.warn('[gibson] camera photo timed out'); res(null); } }, 6000);
     camIdle();
   });
   // label reading: coached burst on the phone (sharpness + on-device text recognition), returns the best cropped frame + OCR text
-  window.GibsonLabel = onHint => new Promise(res => {
+  window.GibsonLabel = (onHint, back) => new Promise(res => {
     clearTimeout(camOffT);
-    const id = ++labelId; labels.set(id, { res: d => { camIdle(); res(d); }, onHint }); N.labelStart(id, !!opt.labelBack, 20000);   // coach up to ~20 s
+    const id = ++labelId; labels.set(id, { res: d => { camIdle(); res(d); }, onHint }); N.labelStart(id, !!(back || opt.labelBack), 20000);   // coach up to ~20 s
     setTimeout(() => { if (labels.has(id)) { labels.delete(id); N.labelStop(id); camIdle(); res(null); } }, 25000);
   });
   // tiny debug line in Settings: camera + wake word state
@@ -184,6 +187,7 @@
     const ve = document.getElementById('vEngine');   // app: Gibson voice always; the phone voice only as a hand-picked last resort
     if (ve) ve.innerHTML = '<option value="eleven">ElevenLabs (default; Kokoro Gibson voice if no key, internet or characters)</option><option value="neural">Kokoro Gibson voice always (on the phone, free)</option><option value="browser">Phone voice (last resort: robotic, not recommended)</option>';
     if (ve) try { const e = window.GibsonApp && GibsonApp.settings().vEngine; ve.value = e === 'browser' || e === 'eleven' ? e : 'neural'; } catch (e) {}
+    const cd = document.getElementById('camDefault'); if (cd) { cd.value = opt.camDefault === 'back' ? 'back' : 'front'; cd.addEventListener('change', () => { opt.camDefault = cd.value; saveOpt(); }); }
     for (const [id, k] of [['faceTrack', 'faceTrack'], ['quietMic', 'quietMic'], ['labelBack', 'labelBack']]) {
       const el = document.getElementById(id); if (!el) continue; el.checked = !!opt[k];
       el.addEventListener('change', () => { opt[k] = el.checked; saveOpt(); if (k === 'faceTrack') { clearTimeout(camOffT); if (el.checked) N.camStart(); else { N.camStop(); window.Gibson && Gibson.lookAt(null); } } });
