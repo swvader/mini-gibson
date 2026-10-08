@@ -148,7 +148,10 @@ if ('serviceWorker' in navigator && location.protocol !== 'file:' && !window.Gib
     <small>“Send this to the Mainframe: …” saves a note for your main assistant (The Gibson). “What's in the Mainframe?” reads them back.</small>
     <div class="row"><button id="sendLog" type="button">Send log</button> <button id="exportData" type="button">Back up</button> <button id="importBtn" type="button">Restore</button></div>
     <textarea id="importBox" placeholder="Paste a backup here, then press Restore" style="width:100%;height:60px;display:none;margin-top:6px"></textarea>
-    <small id="logState"></small> <small id="backupState"></small></div>
+    <small id="logState"></small> <small id="backupState"></small>
+    <div class="row" style="margin-top:.6rem"><label>Log repo (GitHub, owner/name) <input id="logRepo" type="text" placeholder="owner/gibson-logs" autocomplete="off"></label></div>
+    <div class="row"><label>Log token (fine-grained, Issues write) <input id="logToken" type="password" placeholder="github_pat_…" autocomplete="off"></label></div>
+    <small>"Send your log" posts it as a GitHub issue in that repo. Empty = the share sheet.</small></div>
    <div class="card native-only"><h3><span>Phone app</span></h3>
     <label class="chk"><input type="checkbox" id="quietMic"> Quiet listening (mute the phone's mic beeps)</label>
     <label>Default camera <select id="camDefault"><option value="front">Front (normal, phone in the case)</option><option value="back">Back (phone outside the case, e.g. car mount)</option></select></label>

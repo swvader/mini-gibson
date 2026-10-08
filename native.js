@@ -192,6 +192,10 @@
   const locs = new Map(); let locSeq = 0;
   window.GibsonLocate = N.locate ? () => new Promise(res => { const id = ++locSeq; const t = setTimeout(() => { if (locs.has(id)) { locs.delete(id); res({ ok: false, error: 'timeout' }); } }, 16000); locs.set(id, d => { clearTimeout(t); res(d); }); N.locate(id); }) : null;
   window.GibsonOpenMap = N.openMap ? (lat, lng, label) => { try { N.openMap(Number(lat), Number(lng), String(label || '')); } catch (e) {} } : null;
+  window.GibsonNotifTexts = N.notifTexts ? n => { try { return JSON.parse(N.notifTexts(n || 5)); } catch (e) { return []; } } : null;
+  window.GibsonNotifReply = N.notifReply ? (who, text) => { try { return N.notifReply(String(who || ''), String(text || '')); } catch (e) { return 'error'; } } : null;
+  window.GibsonNotifAccess = N.notifEnabled ? () => { try { return !!N.notifEnabled(); } catch (e) { return false; } } : null;
+  window.GibsonOpenNotifAccess = N.openNotifAccess ? () => { try { N.openNotifAccess(); } catch (e) {} } : null;
   window.GibsonCamBack = () => opt.camDefault === 'back';   // Settings: default camera (back = phone outside the case, e.g. car mount)
   window.GibsonSnap = back => new Promise(res => {
     const id = ++snapId; snaps.set(id, res); if (back && N.snapBack) N.snapBack(id); else N.snap(id);

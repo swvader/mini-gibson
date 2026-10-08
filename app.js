@@ -3,7 +3,7 @@
 'use strict';
 const G = window.Gibson;
 const $ = s => document.querySelector(s);
-const VERSION = '1.9.0';
+const VERSION = '1.10.0';
 
 // ------------------------------------------------------------------ settings (localStorage only, on this phone)
 const LS = 'gibson.app.v1';
@@ -12,13 +12,13 @@ const DEFAULTS = {
   keys: { grok: '', gemini: '', openai: '', meta: '', custom: '', eleven: '' },
   models: { grok: 'grok-4.20-0309-non-reasoning', gemini: 'gemini-2.5-flash', openai: 'gpt-6-luna', meta: 'muse-spark-1.1', custom: '' },
   customUrl: '', voice: '', rate: 1.0, pitch: 1.1, lang: 'en-US', wake: false,
-  persona: 'andrew', vEngine: 'eleven', eVoice: 'PMOocVoKCEltMVu66gnd', nVoice: 'gibson', pVoice: 'norman', filler: true, robot: false, nDevice: 'auto', wakeEngine: 'ondevice', wakeSens: 0.35, convo: true, convoTimeout: 25, endPause: 1.4,
+  persona: 'andrew', vEngine: 'eleven', eVoice: 'PMOocVoKCEltMVu66gnd', nVoice: 'gibson', pVoice: 'norman', filler: true, robot: false, nDevice: 'auto', wakeEngine: 'ondevice', wakeSens: 0.35, convo: true, convoTimeout: 25, endPause: 1.1,
   robotOffset: false, safe: false, head: false, headTransport: 'websocket', headUrl: '',
   // 1.0.12 — identity is set up by the user (first run / Settings), nothing personal is baked in; defaults empty so the app can be given to anyone
   creatorName: '', creatorCode: '', passphrase: '', location: '',
   people: [], memory: [], memSummary: '', journal: [], mainframe: [],
   chatHome: '', chatAway: '', chatSsid: '', chatRef: 'cereal-c.wav', chatFirstMs: 25000,
-  proactive: true, quietUntil: 0, lastProactive: 0, lastLowBatt: 0, lastHeat: 0, bootGreetV: 0
+  proactive: true, quietUntil: 0, lastProactive: 0, lastLowBatt: 0, lastHeat: 0, bootGreetV: 0, logRepo: '', logToken: ''
 };
 function load() {
   let s = {}; try { s = JSON.parse(localStorage.getItem(LS) || '{}'); } catch (e) {}
@@ -83,6 +83,7 @@ Your words are spoken aloud by a text-to-speech voice, so:
 - If a short answer leaves out something important, give the short answer and end with a quick offer like "Want the whole rundown?". Don't do that on simple questions.${window.GibsonSnap ? `
 - You have camera eyes. If you're asked to look at, see, check out, or read something and NO photo is attached, reply with only [look] (or [read] for text and labels) and nothing else: the app then snaps a photo and asks you again with it.` : ''}
 - ALWAYS begin your reply with exactly one expression tag in square brackets, chosen only from: ${EXPR.join(', ')}. Use it only at the very start. Example: "[mischievous] We're in. That was almost too easy."
+- You DO keep a build log on this phone (errors, voice/wake/listening events, versions; never keys). If asked, say so; "send your log" uploads it to the creator's GitHub (or opens the share sheet). Never claim you have no log.
 - Phone facts (battery, temperature, signal, storage, memory, throttling) come ONLY from a "PHONE STATUS" note attached to the message. With no such note, say you can't check that right now. Never invent a number.
 ${memLine()}NEVER LIE. This beats the attitude and every other instruction:
 - Never invent, guess or "fill in" facts, numbers, names, prices, scores, doses, dates, or what is in a photo or on a label. The swagger is style; the facts are always real.
@@ -686,6 +687,7 @@ const Chatter = {
   warm() { const net = this.net(); if (this.warmNet === net || !this.usable()) return; this.warmNet = net; this.gen('Ready.', null, 1).catch(() => { this.warmNet = ''; }); },
   async _gen(text, voice, speed) {
     const addr = this.addr(); if (!addr) throw new Error('no Chatterbox address');
+    text = String(text || '').trim(); if (!/[.!?…,;:]["')\]]*$/.test(text)) text += '.';   // always end with punctuation (open endings make it ramble)
     const url = addr + '/tts', body = this.body(text, speed), firstMs = Math.max(4000, S.chatFirstMs || 25000), t0 = performance.now();
     let res;
     if (window.GibsonNativeChat) res = await window.GibsonNativeChat(url, body, firstMs);
@@ -698,7 +700,7 @@ const Chatter = {
     if (res.error) { this.reachOk = false; this.reachNet = this.net(); this.reachAt = Date.now(); throw new Error(/timeout/i.test(res.error) ? 'Chatterbox too slow' : 'Chatterbox unreachable'); }
     if (res.status >= 400 || !res.ab || res.ab.byteLength < 64) throw new Error('Chatterbox HTTP ' + res.status + ' ' + String(res.err || '').replace(/\s+/g, ' ').slice(0, 80));
     const w = wavFloat(res.ab); this.reachOk = true; this.lastMs = res.first != null ? res.first : performance.now() - t0;
-    return { audio: w.audio, sr: w.sr, ms: performance.now() - t0 };
+    return { audio: chatTrim(w.audio, w.sr, text), sr: w.sr, ms: performance.now() - t0, first: this.lastMs };
   },
   cancel() {}
 };
@@ -826,6 +828,14 @@ const cleanText = t => String(t).replace(/\(\s*\[[^\]]*\]+\([^)]*\)\s*\)/g, ' ')
 let speakTok = 0;
 function stopSpeech() { speakTok++; Neural.cancel(); Piper.cancel(); Filler.cancel(); AudioOut.stop(); G.stop(); try { speechSynthesis.cancel(); } catch (e) {} Wake.echo(false); }
 // "Hmm." while the brain is thinking, pre-rendered in the current voice, so a slow answer never feels dead.
+// 1.0.14: Chatterbox hallucinates breathy "oooodaahhh" tails past the end of short lines: cap the length vs the text and cut trailing low-energy audio
+function chatTrim(a, sr, text) {
+  const words = (String(text).match(/\S+/g) || []).length, n = Math.min(a.length, Math.round(Math.max(1.4, words * 0.42 + 0.9) * sr));
+  const W = Math.max(1, Math.round(sr * 0.03)), rms = []; let loud = 0;
+  for (let s0 = 0; s0 + W <= n; s0 += W) { let e = 0; for (let k = s0; k < s0 + W; k++) e += a[k] * a[k]; const v = Math.sqrt(e / W); rms.push(v); if (v > loud) loud = v; }
+  let last = rms.length - 1; while (last > 0 && rms[last] < loud * 0.12) last--;
+  return trimSilence(a.slice(0, Math.min(n, (last + 1) * W + Math.round(sr * 0.08))), sr);
+}
 function trimSilence(a, sr) {
   let pk = 0; for (const x of a) pk = Math.max(pk, Math.abs(x)); const th = pk * .04, pad = Math.round(sr * .03);
   let i = 0, j = a.length - 1; while (i < j && Math.abs(a[i]) < th) i++; while (j > i && Math.abs(a[j]) < th) j--;
@@ -942,13 +952,16 @@ function Speech(onStart, opts) {
     showVoiceState();
   };
   const nextEng = cur => cur === 'chatter' ? (Eleven.usable() ? 'eleven' : 'kokoro') : 'kokoro';
-  const add = piece => {
-    const t = cleanText(piece); if (!t || !/[a-z0-9]/i.test(t)) return;
+  let held = '';
+  const add = (piece, fin) => {
+    let t = cleanText(piece); if (!t || !/[a-z0-9]/i.test(t)) return;
+    if (E === Chatter) { if (held) { t = held + ' ' + t; held = ''; } if (npieces > 0 && t.length < 25 && !fin) { held = t; return; } }
     // split a long first sentence at a comma so the first audio comes sooner
     if ((eng === 'kokoro' || eng === 'eleven' || eng === 'chatter') && npieces === 0 && t.length > 36) {
       const c = t.slice(10, t.length - 8).search(/[,;:—–]\s/); if (c >= 0) { add2(t.slice(0, c + 11)); add(t.slice(c + 11)); return; }
       if (t.length > 70) { const m = t.slice(18, 60).match(/\s(?=(and|but|so|because|which|that|when|if|or|then|while)\s)/i); if (m) { const k = 18 + m.index; add2(t.slice(0, k)); add(t.slice(k)); return; } }
     }
+    if ((eng === 'chatter' || eng === 'eleven') && npieces === 1 && t.length > 120) { const c = t.slice(55, 115).search(/[,;:—–]\s/); if (c >= 0) { const k = 55 + c + 1; add2(t.slice(0, k)); add(t.slice(k)); return; } }   // chunk 2 medium-length
     if (eng === 'kokoro' && t.length > 150) { const mid = t.length >> 1, c = t.slice(mid - 50, mid + 50).search(/[,;:—–]\s/); if (c >= 0) { const k = mid - 50 + c + 1; add2(t.slice(0, k)); add(t.slice(k)); return; } }
     add2(t);
   };
@@ -956,9 +969,9 @@ function Speech(onStart, opts) {
   const split = final => {   // complete sentences = end punctuation followed by a space (or the end of the reply)
     let m; const re = /^(\s*[\s\S]{6,}?[.!?…]+["')\]]*)\s+(?=\S|$)/;
     while ((m = buf.match(re))) { buf = buf.slice(m[0].length); add(m[1]); }
-    if (final && buf.trim()) { add(buf); buf = ''; }
+    if (final && buf.trim()) { add(buf, true); buf = ''; }
   };
-  const begin = () => { if (!begun) { begun = true; begunAt = performance.now(); Turn.tts = performance.now() - t0; console.log(`[gibson] voice: ${eng}${E ? ' (' + E.backend + ')' : ''}, first audio ${Math.round(performance.now() - t0)} ms after the first words arrived`); onStart && onStart(eng); } };
+  const begin = () => { if (!begun) { begun = true; begunAt = performance.now(); Turn.tts = performance.now() - t0; Log.add('tts', eng + ' first audio ' + Math.round(Turn.tts) + ' ms'); console.log(`[gibson] voice: ${eng}${E ? ' (' + E.backend + ')' : ''}, first audio ${Math.round(performance.now() - t0)} ms after the first words arrived`); onStart && onStart(eng); } };
   const playPhone = async text => { if (NEVER_PHONE()) return; await Filler.wait(); if (my !== speakTok) return; begin(); Wake.echo(true, text); await G.speak(text, speakOpts()); };
   const timeout = ms => new Promise(res => setTimeout(() => res(null), Math.max(0, ms)));
   const done = (async () => {
@@ -1006,13 +1019,18 @@ function Speech(onStart, opts) {
           if (my !== speakTok) return;
           if (i >= q.length) { if (ended) break; await waitMore(); continue; }
           const it = q[i++]; let r = null;
-          if (!Turn.long && begun && i > 2 && performance.now() - begunAt > 30000) { capped = true; restText = [it.text].concat(q.slice(i).map(x => x.text)).concat(buf ? [buf] : []).join(' '); break; }   // ~30 s: pause and offer the rest (unless he asked for a long answer)
+          if (!Turn.long && begun && i > 2 && performance.now() - begunAt > 30000) {   // ~30 s in: offer the rest ONLY if a lot is really left (>~30 s), never for a short tail
+            const rs = [it.text].concat(q.slice(i).map(x => x.text)).concat(buf ? [buf] : []).join(' ');
+            if (estDur(rs, sp) >= 30) { capped = true; restText = rs; break; }
+          }
+          it.started = true;
           try { r = await it.p; }
           catch (e) {
             if (eng === 'eleven' || eng === 'chatter') { toEngine(nextEng(eng), e.message || String(e), i - 1); try { r = await q[i - 1].p; } catch (e2) {} }
             if (!r) { console.warn('[gibson] voice render failed: ' + e.message); continue; }   // skip a failed Kokoro piece
           }
           if (my !== speakTok) return;
+          Log.add('tts', eng + ' chunk ' + it.text.length + ' chars, ' + (r.ms != null ? Math.round(r.ms) + ' ms gen' : 'ready') + (r.first != null ? ', first byte ' + Math.round(r.first) + ' ms' : ''));
           await Filler.wait(); if (my !== speakTok) return;
           begin(); Wake.echo(true, it.text); await AudioOut.play(r.audio, r.sr);
         }
@@ -1028,7 +1046,7 @@ function Speech(onStart, opts) {
   return {
     get eng() { return eng; }, get rest() { return capped ? restText : ''; }, done,
     push(t) { if (ended) return; buf += t; split(false); },
-    end() { if (ended) return; split(true); ended = true; kick(); }
+    end() { if (ended) return; split(true); if (held) { add2(held); held = ''; } ended = true; kick(); }
   };
 }
 // Speak a whole text. Resolves the moment the last audio ends, so the conversation can continue immediately.
@@ -1411,7 +1429,9 @@ function runCommand(my, o) {
       Wake.note(true, NAME_RE.test(raw) ? 'heard "Gibson"' : 'strong wake score');
     }
     if (o.auto && said && (said.length < 3 || NOISE_RE.test(said))) { Convo.exit(); toStandby(null); return; }   // open window: ignore tiny noise
+    if (why === 'stall') Log.add('listen', 'stall: recognizer stopped updating; finalized "' + said.slice(0, 60) + '"');
     if (said) { ask(said); return; }                       // ask() switches listening -> thinking directly
+    if (turn.heard && !o.auto && !o.verify) { Log.add('listen', 'heard speech but got no words (' + why + ')'); return sayLine("[confused] Didn't catch that, man. Say it again?", 'confused'); }
     if (Convo.on) { chime(false); status(why === 'error' ? 'Listening stopped (speech recognition error).' : 'Conversation ended: no speech.'); toStandby('neutral'); }
     else toStandby(null);
   };
@@ -1425,13 +1445,14 @@ function runCommand(my, o) {
       const fins = [], ints = [];
       for (let i = 0; i < e.results.length; i++) { const t = e.results[i][0].transcript; if (e.results[i].isFinal) mergeFinal(fins, t); else ints.push(t); }
       turn.fins = fins; turn.interim = ints.join(' ').trim();
-      if (!text()) return;
-      turn.lastHeard = Date.now(); Convo.idleSince = Date.now(); G.setListenLevel(.8);
+      const cur = text(); if (!cur) return; turn.heard = true;
+      if (cur === turn.lastText) return;                   // Android repeats the same interim: don't keep the mic open for it (the end timer keeps running)
+      turn.lastText = cur; turn.lastHeard = Date.now(); Convo.idleSince = Date.now(); G.setListenLevel(.8);
       if (fins.length && !turn.interim && isExit(text())) return finish('exit');
       const pause = Math.max(.8, S.endPause || 1.4) * 1000;
       armEnd(pause);                                       // Android marks phrases final on short pauses: don't trust that, use our own timer
     };
-    r.onspeechstart = () => { G.setListenLevel(.6); Convo.idleSince = Date.now(); };
+    r.onspeechstart = () => { G.setListenLevel(.6); Convo.idleSince = Date.now(); turn.heard = true; };
     r.onerror = e => { err = e.error; if (e.error === 'not-allowed' || e.error === 'service-not-allowed') status('Microphone blocked: allow mic access for this site (lock icon in the address bar).'); else if (e.error === 'network') status('Speech recognition needs internet on this phone (network error).'); };
     r.onend = () => {                                      // the session ended by itself (we didn't call finish)
       if (rec !== r) return; rec = null; recMode = null;
@@ -1459,7 +1480,9 @@ function runCommand(my, o) {
   };
   start();
   // watchdog: never stuck listening (silence window in conversation mode, 10 s for a single question; 40 s max per turn)
-  const wd = () => { if (turn.done || my !== reqId) return; if (!text() && Date.now() - turn.t0 > (o.auto ? 7000 : Convo.on ? Math.max(4000, Convo.left()) : 10000)) return finish('silence');   /* open windows (conversation / offers) stay short: 7 s */ if (Date.now() - turn.t0 > 40000) return finish('long'); stopRec.wd = setTimeout(wd, 500); };
+  const wd = () => { if (turn.done || my !== reqId) return;
+    if (text() && turn.lastHeard && Date.now() - turn.lastHeard > Math.max(.8, S.endPause || 1.1) * 1000 + 1500) return finish('stall');   // words but the recognizer went quiet: use what we have
+    if (!text() && Date.now() - turn.t0 > (o.auto ? 7000 : Convo.on ? Math.max(4000, Convo.left()) : 10000)) return finish('silence');   /* open windows (conversation / offers) stay short: 7 s */ if (Date.now() - turn.t0 > 40000) return finish('long'); stopRec.wd = setTimeout(wd, 500); };
   stopRec.wd = setTimeout(wd, 500);
 }
 function cancelListening() { reqId++; stopRec(); toStandby(null); }
@@ -1476,11 +1499,13 @@ const Wake = {
     if (this.loading) return this.loading;
     this.loading = new Promise((res, rej) => {
       const w = this.worker = new Worker('wake/wake-worker.js');
-      const to = setTimeout(() => rej(new Error('wake model load timeout')), 90000);
+      this.stage = 'starting worker'; const tl = Date.now();
+      const to = setTimeout(() => rej(new Error('wake model load timeout (stuck at: ' + this.stage + ')')), 90000);
       w.onmessage = e => {
         const m = e.data;
-        if (m.type === 'ready') { clearTimeout(to); this.ready = true; w.postMessage({ type: 'threshold', v: wakeTh() }); res(); }
-        else if (m.type === 'error' && m.fatal) { clearTimeout(to); rej(new Error(m.msg)); }
+        if (m.type === 'stage') { this.stage = m.s; Log.add('wake', 'load: ' + m.s); }
+        else if (m.type === 'ready') { Log.add('wake', 'on-device wake model ready in ' + (Date.now() - tl) + ' ms'); clearTimeout(to); this.ready = true; w.postMessage({ type: 'threshold', v: wakeTh() }); res(); }
+        else if (m.type === 'error' && m.fatal) { clearTimeout(to); rej(new Error('wake load failed at ' + m.msg)); }
         else if (m.type === 'alive') { this.alive = Date.now(); this.frames = m.frames; }
         else if (m.type === 'score') { this.peak = Math.max(this.peak || 0, m.s); const el = $('#wMeter'); if (el) { el.style.width = Math.round(m.s * 100) + '%'; clearTimeout(this.mt); this.mt = setTimeout(() => { el.style.width = '0'; }, 400); } }
         else if (m.type === 'wake') this.onWake(m.s, m.frames);
@@ -1724,7 +1749,7 @@ function syncUI() {
   $('#robotOffset').checked = S.robotOffset; $('#safe').checked = S.safe;
   $('#head').checked = S.head; $('#headOpts').style.display = S.head ? '' : 'none'; $('#headTransport').value = S.headTransport; $('#headUrl').value = S.headUrl;
   const setV = (id, v) => { const el = $('#' + id); if (el) el.value = v == null ? '' : v; };
-  setV('creatorName', S.creatorName); setV('creatorCode', S.creatorCode); setV('passphrase', S.passphrase); setV('location', S.location);
+  setV('creatorName', S.creatorName); setV('creatorCode', S.creatorCode); setV('passphrase', S.passphrase); setV('location', S.location); setV('logRepo', S.logRepo); setV('logToken', S.logToken);
   setV('chatHome', S.chatHome); setV('chatAway', S.chatAway); setV('chatSsid', S.chatSsid); setV('chatRef', S.chatRef || 'cereal-c.wav');
   if ($('#chatFirstMs')) { $('#chatFirstMs').value = S.chatFirstMs || 25000; $('#chatFirstV').textContent = Math.round((S.chatFirstMs || 25000) / 1000) + ' s'; }
   if ($('#proactive')) $('#proactive').checked = !!S.proactive;
@@ -1794,6 +1819,8 @@ function bindSettings() {
     else if (el.id === 'creatorCode') S.creatorCode = el.value.trim();
     else if (el.id === 'passphrase') S.passphrase = el.value;
     else if (el.id === 'location') S.location = el.value.trim();
+    else if (el.id === 'logRepo') S.logRepo = el.value.trim().replace(/^https?:\/\/github\.com\//i, '').replace(/\/+$/, '');
+    else if (el.id === 'logToken') S.logToken = el.value.trim();
     else if (el.id === 'proactive') S.proactive = el.checked;
     else if (el.id === 'chatHome') { S.chatHome = el.value; Chatter.reachOk = null; }   // reach test runs on blur/Save/Test, not on every keystroke (was spamming the log)
     else if (el.id === 'chatAway') { S.chatAway = el.value; Chatter.reachOk = null; }
@@ -1932,22 +1959,44 @@ async function verifyCreator(force) {
 function denyLine() { const c = S.creatorCode || S.creatorName || 'the owner'; return pick(['[skeptical] Access denied, man. Root privileges belong to ' + c + '.', "[mischievous] Nice try. That console's locked to " + c + ' only.', '[neutral] Can\'t do that for you. Only ' + c + ' has the keys to that one.']); }
 
 // --- phone: contacts, texting, calling, 911, reading texts
-let pendingSms = null, pendingPick = null, pending911 = null;
+let pendingSms = null, pendingPick = null, pending911 = null, pendingMf = false;
+if (S.endPauseV !== 2) { if ((S.endPause || 1.4) >= 1.4) S.endPause = 1.1; S.endPauseV = 2; save(); }   // 1.0.14: stop listening ~1 s after you finish (was 1.4 s)
 function digits(s) { return String(s || '').replace(/[^0-9+]/g, ''); }
+// 1.0.14 contact matching: normalized + fuzzy/phonetic ("Len Len" = "Lenlen" = "Len-Len" ~ "Lynn Lynn" ~ "Lend Len")
+const collapse = x => norm(x).replace(/[^a-z0-9]/g, '');
+const phon = x => collapse(x).replace(/ph/g, 'f').replace(/ck|q/g, 'k').replace(/[aeiouy]+/g, 'a').replace(/(.)\1+/g, '$1').replace(/(?<=.)[hw]/g, '').replace(/d(?=l|$)/g, '');
+function dice(a, b) { if (a === b) return 1; if (a.length < 2 || b.length < 2) return 0; const g = s0 => { const m = new Map(); for (let i = 0; i < s0.length - 1; i++) { const k = s0.slice(i, i + 2); m.set(k, (m.get(k) || 0) + 1); } return m; }; const A = g(a), B = g(b); let hit = 0; A.forEach((c, k) => { hit += Math.min(c, B.get(k) || 0); }); return 2 * hit / (a.length + b.length - 2); }
+function scoreContact(q, name) {
+  const nq = norm(q), nn = norm(name), cq = collapse(q), cn = collapse(name); if (!cq || !cn) return 0;
+  if (nn === nq || cn === cq) return 100;
+  if (cn.startsWith(cq) || nn.startsWith(nq + ' ')) return 85;
+  if (nn.split(' ').some(w => w === nq)) return 75;                 // matches a whole word (first or last name)
+  if (cn.includes(cq) && cq.length >= 3) return 65;
+  if (phon(q) === phon(name)) return 62;                            // sounds the same
+  return Math.max(dice(cq, cn), dice(phon(q), phon(name)) * .95) * 60;
+}
+function roleToName(q) {   // "my son" / "dad" -> the person saved with that role
+  const r0 = norm(q).replace(/^(my|our) /, ''); const p = (S.people || []).find(x => x.role && norm(x.role) === r0); return p ? p.name : null;
+}
 async function resolveContact(name) {
   if (!window.GibsonContacts) return { err: 'no contacts access' };
-  let list = []; try { list = await window.GibsonContacts(name); } catch (e) { return { err: 'contacts failed' }; }
+  const q = String(roleToName(name) || name || '').trim(); if (collapse(q).length < 2) return { none: true };   // never search with an empty name
+  let list = []; try { list = await window.GibsonContacts(q); } catch (e) { return { err: 'contacts failed' }; }
   if (!list || !list.length) return { none: true };
-  if (list.length === 1) return { one: list[0] };
-  return { many: list.slice(0, 6) };
+  const sc = list.map(c => ({ c, s: scoreContact(q, c.name) + (c.starred ? 4 : 0) })).filter(x => x.s >= 40).sort((a, b) => b.s - a.s);
+  if (!sc.length) return { none: true };
+  if (sc.length === 1 || (sc[0].s >= 75 && sc[0].s - sc[1].s >= 12)) return { one: sc[0].c };
+  const many = sc.filter(x => x.s >= sc[0].s - 20).slice(0, 3).map(x => x.c);
+  return many.length === 1 ? { one: many[0] } : { many };
 }
+const listNames = l => l.map((x, i) => (i + 1) + ', ' + x.name + (x.number ? ' ending ' + digits(x.number).slice(-4).split('').join(' ') : '')).join('; ');
 async function startText(name, msg) {
   if (!window.GibsonSendSms) return sayLine("[confused] I can't send texts on this phone yet.");
   if (!(await verifyCreator())) return sayLine(denyLine(), 'skeptical');
   const c = await resolveContact(name);
   if (c.err) return sayLine('[sad] My contacts are off, so I can\'t look up ' + name + '. Turn on contacts for me in settings.');
   if (c.none) return sayLine("[confused] I couldn't find " + name + ' in your contacts, man.');
-  if (c.many) { pendingPick = { kind: 'text', msg, list: c.many }; return sayLine('[curious] I found a few: ' + c.many.map(x => x.name).join(', ') + '. Which one?'); }
+  if (c.many) { pendingPick = { kind: 'text', msg, list: c.many }; return sayLine('[curious] I found a few: ' + listNames(c.many) + '. Which one?'); }
   return afterContactText(c.one, msg);
 }
 function afterContactText(contact, msg) {
@@ -1955,7 +2004,9 @@ function afterContactText(contact, msg) {
   pendingSms = { contact }; return sayLine('[happy] Okay man, what do you wanna send ' + contact.name + '?');
 }
 async function doSendSms(s) {
-  try { const res = await window.GibsonSendSms(digits(s.contact.number), s.msg); if (res === 'ok' || res === true) { Log.add('sms', 'sent to ' + s.contact.name); return sayLine('[happy] Sent to ' + s.contact.name + '. We\'re in.'); } return sayLine('[sad] It wouldn\'t send: ' + res + '.'); }
+  try {
+    if (window.GibsonNotifReply) { const rr = window.GibsonNotifReply(s.contact.name, s.msg); if (rr === 'ok') { Log.add('sms', 'replied in thread to ' + s.contact.name); return sayLine('[happy] Sent to ' + s.contact.name + ' right in your Messages thread. We\'re in.'); } Log.add('sms', 'no reply thread for ' + s.contact.name + ' (' + rr + '), using SMS'); }
+    const res = await window.GibsonSendSms(digits(s.contact.number), s.msg); if (res === 'ok' || res === true) { Log.add('sms', 'sent to ' + s.contact.name); return sayLine('[happy] Sent to ' + s.contact.name + '. We\'re in.'); } return sayLine('[sad] It wouldn\'t send: ' + res + '.'); }
   catch (e) { return sayLine('[sad] It wouldn\'t send: ' + (e.message || e) + '.'); }
 }
 async function startCall(name) {
@@ -1964,7 +2015,7 @@ async function startCall(name) {
   const c = await resolveContact(name);
   if (c.err) return sayLine('[sad] My contacts are off, so I can\'t look up ' + name + '.');
   if (c.none) return sayLine("[confused] I can't find " + name + ' in your contacts.');
-  if (c.many) { pendingPick = { kind: 'call', list: c.many }; return sayLine('[curious] A few matches: ' + c.many.map(x => x.name).join(', ') + '. Which one?'); }
+  if (c.many) { pendingPick = { kind: 'call', list: c.many }; return sayLine('[curious] A few matches: ' + listNames(c.many) + '. Which one?'); }
   return placeCall(c.one.number, c.one.name);
 }
 function placeCall(number, name) { try { window.GibsonCall(digits(number)); Log.add('call', 'dialing ' + (name || number)); return sayLine('[excited] Dialing ' + (name || number) + '. Putting it on speaker.'); } catch (e) { return sayLine('[sad] I couldn\'t start the call: ' + (e.message || e) + '.'); } }
@@ -1978,7 +2029,9 @@ async function readTexts() {
   if (!window.GibsonRecentTexts) return sayLine("[confused] I can't read texts on this phone yet.");
   if (!(await verifyCreator())) return sayLine(denyLine(), 'skeptical');
   let list = []; try { list = await window.GibsonRecentTexts(5); } catch (e) {}
-  if (!list || !list.length) return sayLine('[neutral] No new texts, man.');
+  let nt = []; if (window.GibsonNotifTexts) { if (window.GibsonNotifAccess && !window.GibsonNotifAccess()) notifGuide(); else { try { nt = window.GibsonNotifTexts(5) || []; } catch (e) {} } }
+  const seen = new Set(); list = nt.concat(list || []).filter(m => { const k = collapse(m.body).slice(0, 40); if (!k || seen.has(k)) return false; seen.add(k); return true; }).slice(0, 5);
+  if (!list.length) return sayLine('[neutral] No new texts, man.');
   const line = list.map(m => 'From ' + (m.name || m.from) + ': ' + m.body).join('. ');
   return sayLine('[happy] ' + line, 'happy');
 }
@@ -2095,14 +2148,20 @@ async function intercept(raw) {
   if (!n) return false;
   // passphrase capture
   if (awaitPass) { const f = awaitPass; awaitPass = null; f(t); return true; }
+  if (/^(cancel|never mind|nevermind|forget it|drop it|stop that|cancel that|scrap it)$/.test(n) && (pendingPick || pendingSms || pendingRest || pendingMf)) { pendingPick = pendingSms = pendingRest = null; pendingMf = false; sayLine('[neutral] Dropped it, man.'); return true; }
+  if (pendingMf) { pendingMf = false; S.mainframe = S.mainframe || []; S.mainframe.push({ t: Date.now(), text: t }); while (S.mainframe.length > 200) S.mainframe.shift(); save(); renderMainframe(); sayLine('[mischievous] Logged it to the Mainframe inbox, ' + (S.creatorName || 'man') + '.'); return true; }
   if (pendingRest && /\b(yes|yeah|yep|sure|go on|the rest|keep going|continue|rest|more)\b/.test(n)) { const rt = pendingRest; pendingRest = null; sayLine('[mischievous] ' + rt, 'mischievous'); return true; }
   // 911 cancel wins over everything
   if (pending911 && /\b(cancel|stop|no|abort|never mind)\b/.test(n)) { cancel911(); return true; }
   // pending contact pick
-  if (pendingPick) { const p = pendingPick; const hit = p.list.find(x => norm(x.name) === n) || p.list.find(x => n.includes(norm(x.name).split(' ')[0])) || (/^\d$/.test(n) ? p.list[+n - 1] : null);
+  if (pendingPick) {   // accept first/second/third, a number, or a partial / fuzzy name; ONE miss, then let the words through as normal
+    const p = pendingPick, ORD = { first: 1, one: 1, '1': 1, second: 2, two: 2, '2': 2, third: 3, three: 3, '3': 3, last: p.list.length };
+    const mo = n.match(/\b(first|second|third|last|one|two|three|[123])\b/); let hit = mo ? p.list[ORD[mo[1]] - 1] : null;
+    if (!hit) { const sc = p.list.map(x => ({ x, s: Math.max(scoreContact(t, x.name), scoreContact(t.split(' ')[0], x.name.split(' ')[0])) })).sort((a, b) => b.s - a.s); if (sc[0] && sc[0].s >= 50 && (!sc[1] || sc[0].s > sc[1].s)) hit = sc[0].x; }
     if (hit) { pendingPick = null; return (p.kind === 'call' ? placeCall(hit.number, hit.name) : afterContactText(hit, p.msg)), true; }
-    if (/\b(cancel|never mind|stop|forget it)\b/.test(n)) { pendingPick = null; sayLine('[neutral] Okay, dropped it.'); return true; }
-    sayLine('[confused] Which one? ' + p.list.map(x => x.name).join(', ') + '.'); return true; }
+    if (!p.missed) { p.missed = true; sayLine('[confused] Which one? Say the number: ' + listNames(p.list) + '.'); return true; }
+    pendingPick = null; Log.add('sms', 'contact pick dropped after a miss: "' + t.slice(0, 40) + '"');   // fall through: handle this utterance normally
+  }
   // pending SMS message / confirm
   if (pendingSms) {
     const s = pendingSms;
@@ -2137,6 +2196,8 @@ async function intercept(raw) {
   }
   // mainframe inbox
   let m;
+  if (/\b(send|upload|share|post|give me|drop)\b.{0,12}\b(your|the|my|gibson'?s?)? ?(build )?logs?\b/.test(n) && !/\b(text|message)\b/.test(n)) return sendLogOut(/mainframe/.test(n)), true;
+  if (/^(?:(?:send|tell|note|save|log|put)(?: (?:this|that|it|something))?(?: (?:to|in|into|for))? )?(?:the )?mainframe$/.test(n)) { pendingMf = true; return sayLine('[curious] What should I log to the Mainframe?'), true; }
   if ((m = t.match(/^(?:send (?:this|that)|tell|note|save (?:this|that))?\s*(?:to )?(?:the )?mainframe[:,\- ]+(.+)$/i)) || (m = t.match(/^(?:check|anything) (?:with )?(?:the )?mainframe$/i) && null)) {
     S.mainframe = S.mainframe || []; S.mainframe.push({ t: Date.now(), text: m[1].trim() }); while (S.mainframe.length > 200) S.mainframe.shift(); save(); renderMainframe();
     return sayLine('[mischievous] Logged it to the Mainframe inbox. It\'s waiting for you, ' + (S.creatorName || 'man') + '.'), true;
@@ -2162,12 +2223,37 @@ async function intercept(raw) {
   // 911
   if (/\b(call 911|dial 911|call nine one one|emergency call|call the police|call an ambulance)\b/.test(n)) { return start911(), true; }
   // texting / calling / reading texts (creator-gated)
-  if ((m = t.match(/^(?:send (?:a )?(?:text|message|sms)|text|message) (?:to )?([a-z][a-z' .-]{1,30}?)(?: saying| that says| with|:| )?\s*(.*)$/i)) && !/\bmainframe\b/i.test(t)) {
-    const name = m[1].trim(); if (/^(me|you|myself)$/i.test(name)) return false; return startText(name, (m[2] || '').trim()), true;
+  // name extraction (1.0.14 fix: the old lazy regex cut names to 2 letters / nothing): "text Len Len", "send a text to my son saying hi"
+  if ((m = t.match(/^(?:send (?:a |an )?(?:text|message|sms|msg)|text|message|msg)(?: (.*))?$/i)) && !/\bmainframe\b/i.test(t)) {
+    let rest = (m[1] || '').replace(/^to\s+/i, '').trim(), name = rest, msg = '';
+    const mm = rest.match(/^(.+?)\s*(?:,|:|\bsaying\b|\bthat says\b|\bto say\b|\btelling (?:him|her|them)\b|\band say\b)\s*(.+)$/i); if (mm) { name = mm[1]; msg = mm[2]; }
+    name = name.replace(/[.?!,]+$/, '').trim();
+    if (/^(me|you|myself)$/i.test(name)) return false;
+    if (collapse(name).length < 2) return sayLine('[curious] Who do you want me to text, man?'), true;
+    return startText(name, msg.trim()), true;
   }
-  if ((m = t.match(/^(?:call|phone|ring|dial) ([a-z][a-z' .-]{1,30})$/i))) { const name = m[1].trim(); if (!/^\d+$/.test(name)) return startCall(name), true; }
+  if ((m = t.match(/^(?:call|phone|ring|dial)(?: (.*))?$/i)) && !/\b911\b|nine one one/.test(n)) {
+    const name = (m[1] || '').replace(/[.?!,]+$/, '').replace(/\b(on speaker|please|now|for me)\b/gi, '').trim();
+    if (/^\d[\d\s-]*$/.test(name)) return false;
+    if (collapse(name).length < 2) return sayLine('[curious] Who should I call?'), true;
+    return startCall(name), true;
+  }
   if (/\b(read (?:me )?(?:my )?(?:new )?(?:texts?|messages?|sms)|any (?:new )?(?:texts?|messages?)|check my (?:texts?|messages?))\b/.test(n)) { return readTexts(), true; }
   return false;
+}
+
+// 1.0.14: "send your log" -> a GitHub issue in the creator's own repo (Settings), else the share sheet
+async function sendLogOut(toMf) {
+  const repo = (S.logRepo || '').trim(), tok = (S.logToken || '').trim();
+  if (!repo || !tok || !/^[\w.-]+\/[\w.-]+$/.test(repo)) { Log.send(); return sayLine("[neutral] No GitHub set up for logs, so I popped the share sheet. Put a repo and token in settings and I'll beam it up myself."); }
+  sayLine('[mischievous] Uploading my log' + (toMf ? ' to the Mainframe' : '') + '…');
+  try {
+    const when = new Date().toLocaleString(), body = '```\n' + Log.text().slice(-60000) + '\n```';
+    const res = await brainFetch('https://api.github.com/repos/' + repo + '/issues', { method: 'POST', headers: { Authorization: 'Bearer ' + tok, Accept: 'application/vnd.github+json', 'Content-Type': 'application/json', 'X-GitHub-Api-Version': '2022-11-28' }, body: JSON.stringify({ title: 'Gibson log ' + when, body }) });
+    if (res && res.status >= 200 && res.status < 300) { Log.add('log', 'uploaded to GitHub ' + repo); return sayLine('[happy] Log\'s up on your GitHub, issue "Gibson log ' + when + '". ' + (toMf ? 'The Mainframe has it.' : 'Go dig in.'), 'happy'); }
+    Log.add('log', 'GitHub upload failed HTTP ' + (res && res.status)); Log.send();
+    return sayLine('[sad] GitHub said no (HTTP ' + (res ? res.status : '?') + (res && res.status === 401 ? ', token rejected' : res && res.status === 404 ? ', repo not found or token can\'t see it' : '') + '). I opened the share sheet instead.');
+  } catch (e) { Log.add('log', 'GitHub upload error: ' + (e.message || e)); Log.send(); return sayLine('[sad] Couldn\'t reach GitHub, so I opened the share sheet.'); }
 }
 
 // incoming call / sms announcements from the native side
@@ -2176,8 +2262,11 @@ async function onCall(d) {
   const name = d.name || (d.number ? d.number : 'unknown number');
   if (!busy) sayLine('[surprised] Incoming call from ' + name + '.', 'surprised');
 }
+let lastSmsKey = '', lastSmsAt = 0;
+function notifGuide() { if (notifGuide.done) return; notifGuide.done = true; Log.add('sms', 'notification access is off: RCS / Google Messages texts are invisible'); sayLine("[curious] To see your Google Messages texts I need notification access. I'm opening that setting — switch Mini Gibson on."); setTimeout(() => { try { window.GibsonOpenNotifAccess && window.GibsonOpenNotifAccess(); } catch (e) {} }, 3500); }
 async function onSms(d) {
   if (!d) return; const name = d.name || d.from || 'someone';
+  const k = collapse(d.body).slice(0, 40); if (k && k === lastSmsKey && Date.now() - lastSmsAt < 15000) return; lastSmsKey = k; lastSmsAt = Date.now();   // SMS receiver + notification can both report the same text
   if (busy) return;
   if (isCreatorNow()) sayLine('[happy] New text from ' + name + ': ' + (d.body || ''), 'happy');
   else sayLine('[neutral] New text from ' + name + '.');

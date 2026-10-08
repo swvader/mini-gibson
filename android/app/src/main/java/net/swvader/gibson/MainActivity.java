@@ -93,7 +93,7 @@ public class MainActivity extends androidx.fragment.app.FragmentActivity {
   volatile String lastJpeg; volatile long lastJpegAt; volatile int camFrames; volatile String camErr = ""; int srRetry;
 
   static java.lang.ref.WeakReference<MainActivity> inst;
-  volatile int faceWanted; boolean faceWantedEnroll; int authReqId;
+  volatile int faceWanted; boolean faceWantedEnroll; int authReqId; volatile String notifTexts = "[]";
   @Override protected void onCreate(Bundle b) {
     inst = new java.lang.ref.WeakReference<>(this);
     super.onCreate(b);
@@ -880,7 +880,7 @@ public class MainActivity extends androidx.fragment.app.FragmentActivity {
 
   // ------------------------------------------------------------------ JS bridge
   class Bridge {
-    @JavascriptInterface public String info() { return J("app", "1.0.13", "cores", Runtime.getRuntime().availableProcessors(), "model", "kokoro-int8-multi-lang-v1_0").toString(); }
+    @JavascriptInterface public String info() { return J("app", "1.0.14", "cores", Runtime.getRuntime().availableProcessors(), "model", "kokoro-int8-multi-lang-v1_0").toString(); }
     @JavascriptInterface public void ttsInit() { ttsExec.execute(MainActivity.this::ttsLoad); }
     @JavascriptInterface public void tts(int id, String text, int sid, float speed) { ttsExec.execute(() -> { if (tts == null) ttsLoad(); ttsGen(id, text, sid, speed); }); }
     @JavascriptInterface public void srStart(String lang, boolean continuous, boolean quiet) {
@@ -959,11 +959,14 @@ public class MainActivity extends androidx.fragment.app.FragmentActivity {
     @JavascriptInterface public String contacts(String q) {
       if (ContextCompat.checkSelfPermission(MainActivity.this, Manifest.permission.READ_CONTACTS) != PackageManager.PERMISSION_GRANTED) { main.post(() -> requestPermissions(new String[]{ Manifest.permission.READ_CONTACTS }, 5)); return "[]"; }
       org.json.JSONArray arr = new org.json.JSONArray();
-      try { android.net.Uri uri = android.provider.ContactsContract.CommonDataKinds.Phone.CONTENT_URI; String sel = null; String[] args = null;
-        if (q != null && !q.trim().isEmpty()) { sel = android.provider.ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME + " LIKE ?"; args = new String[]{ "%" + q.trim() + "%" }; }
-        android.database.Cursor cur = getContentResolver().query(uri, new String[]{ android.provider.ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME, android.provider.ContactsContract.CommonDataKinds.Phone.NUMBER }, sel, args, android.provider.ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME + " ASC");
+      try {
+        String tok = q == null ? "" : q.trim().split("\\s+")[0];   // broad candidates (first token); JS does the fuzzy ranking
+        String[] proj = { android.provider.ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME, android.provider.ContactsContract.CommonDataKinds.Phone.NUMBER, android.provider.ContactsContract.CommonDataKinds.Phone.STARRED };
         java.util.HashSet<String> seen = new java.util.HashSet<>();
-        if (cur != null) { while (cur.moveToNext() && arr.length() < 8) { String nm = cur.getString(0), num = cur.getString(1); if (nm == null || num == null) continue; String k = nm.toLowerCase(); if (seen.contains(k)) continue; seen.add(k); arr.put(new JSONObject().put("name", nm).put("number", num)); } cur.close(); }
+        java.util.function.Consumer<android.database.Cursor> take = cur -> { try { if (cur == null) return; while (cur.moveToNext() && arr.length() < 60) { String nm = cur.getString(0), num = cur.getString(1); if (nm == null || num == null) continue; String k = nm.toLowerCase(); if (seen.contains(k)) continue; seen.add(k); arr.put(new JSONObject().put("name", nm).put("number", num).put("starred", cur.getInt(2) == 1)); } cur.close(); } catch (Throwable e) {} };
+        android.net.Uri uri = android.provider.ContactsContract.CommonDataKinds.Phone.CONTENT_URI;
+        if (!tok.isEmpty()) take.accept(getContentResolver().query(uri, proj, android.provider.ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME + " LIKE ?", new String[]{ "%" + tok + "%" }, null));
+        take.accept(getContentResolver().query(uri, proj, android.provider.ContactsContract.CommonDataKinds.Phone.STARRED + "=1", null, null));   // starred always included
       } catch (Throwable e) {}
       return arr.toString();
     }
@@ -988,6 +991,10 @@ public class MainActivity extends androidx.fragment.app.FragmentActivity {
     @JavascriptInterface public void authBiometric(int id, String reason) { main.post(() -> MainActivity.this.authBiometric(id, reason)); }
     @JavascriptInterface public void locate(int id) { httpExec.execute(() -> MainActivity.this.locate(id)); }
     @JavascriptInterface public void openMap(double lat, double lng, String label) { main.post(() -> MainActivity.this.openMap(lat, lng, label)); }
+    @JavascriptInterface public String notifTexts(int n) { MsgListener l = MsgListener.inst; if (l != null) l.push(); return notifTexts == null ? "[]" : notifTexts; }
+    @JavascriptInterface public String notifReply(String who, String text) { MsgListener l = MsgListener.inst; return l == null ? "no-access" : l.reply(who, text); }
+    @JavascriptInterface public boolean notifEnabled() { return MsgListener.inst != null; }
+    @JavascriptInterface public void openNotifAccess() { main.post(() -> { try { startActivity(new android.content.Intent("android.settings.ACTION_NOTIFICATION_LISTENER_SETTINGS").addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)); } catch (Throwable e) {} }); }
     @JavascriptInterface public void exit() { main.post(MainActivity.this::finish); }
   }
 }

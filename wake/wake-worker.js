@@ -25,12 +25,18 @@ function classify(x) {                     // x: Float32Array(16*96)
 }
 async function init(m) {
   const opt = { executionProviders: ['wasm'], graphOptimizationLevel: 'all' };
-  [mel, emb, clf] = await Promise.all([
-    ort.InferenceSession.create(m.base + 'melspectrogram.onnx', opt),
-    ort.InferenceSession.create(m.base + 'embedding_model.onnx', opt),
-    fetch(m.base + m.model).then(r => { if (!r.ok) throw new Error('model HTTP ' + r.status); return r.json(); })
-  ]);
-  need = Math.max(clf.need || 2, 4); ready = true;   // 1.0.9: score must stay high for 4+ frames in a row (~0.3 s) postMessage({ type: 'ready', name: clf.name || 'hey gibson', version: clf.version });
+  let stage = 'fetch model files';
+  try {   // 1.0.14: each load stage is reported, so a failure names the exact step
+    const get = (f, kind) => fetch(m.base + f).then(r => { if (!r.ok) throw new Error(f + ' HTTP ' + r.status); return kind === 'json' ? r.json() : r.arrayBuffer(); });
+    const [melB, embB, c] = await Promise.all([get('melspectrogram.onnx'), get('embedding_model.onnx'), get(m.model, 'json')]);
+    postMessage({ type: 'stage', s: 'files ok (mel ' + melB.byteLength + ' B, emb ' + embB.byteLength + ' B, threads ' + ort.env.wasm.numThreads + ', isolated ' + !!self.crossOriginIsolated + ')' });
+    stage = 'ORT wasm init + mel session'; mel = await ort.InferenceSession.create(new Uint8Array(melB), opt);
+    postMessage({ type: 'stage', s: 'mel session ok' });
+    stage = 'embedding session'; emb = await ort.InferenceSession.create(new Uint8Array(embB), opt);
+    clf = c;
+  } catch (err) { throw new Error(stage + ': ' + (err && err.message || err)); }
+  need = Math.max(clf.need || 2, 4); ready = true;   // 1.0.9: score must stay high for 4+ frames in a row (~0.3 s)
+  postMessage({ type: 'ready', name: clf.name || 'hey gibson', version: clf.version });   // 1.0.14 FIX: this was accidentally inside the comment above since 1.0.9, so the page never heard "ready" and timed out
 }
 async function step(chunk) {               // chunk: 1280 samples (int16 scale)
   const x = new Float32Array(1760); x.set(tail, 0); x.set(chunk, 480); tail = chunk.slice(800);
