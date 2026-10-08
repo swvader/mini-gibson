@@ -78,7 +78,7 @@ import java.util.concurrent.Executors;
 //  - Kokoro voice via sherpa-onnx (int8, CPU) with the Gibson blends baked into voices.bin
 //  - quiet speech recognition (Android SpeechRecognizer, start/stop beeps muted)
 //  - face tracking (CameraX + ML Kit) and camera snapshots for "what do you see?" questions
-public class MainActivity extends ComponentActivity {
+public class MainActivity extends androidx.fragment.app.FragmentActivity {
   static final String HOST = "appassets.androidplatform.net";
   WebView web;
   final Handler main = new Handler(Looper.getMainLooper());
@@ -114,7 +114,14 @@ public class MainActivity extends ComponentActivity {
           catch (Exception e) { return null; }
         }).build();
     web.setWebViewClient(new WebViewClient() {
-      @Override public WebResourceResponse shouldInterceptRequest(WebView v, WebResourceRequest r) { return loader.shouldInterceptRequest(r.getUrl()); }
+      @Override public WebResourceResponse shouldInterceptRequest(WebView v, WebResourceRequest r) {
+        WebResourceResponse resp = loader.shouldInterceptRequest(r.getUrl());
+        if (resp != null) { String pth = r.getUrl().getPath(); if (pth != null) {
+          String mime = pth.endsWith(".mjs") || pth.endsWith(".js") ? "text/javascript" : pth.endsWith(".wasm") ? "application/wasm" : pth.endsWith(".json") ? "application/json" : null;
+          if (mime != null) resp.setMimeType(mime);   // WebViewAssetLoader guesses .mjs as text/plain; strict WebViews then refuse the module and the on-device wake model never loads
+        } }
+        return resp;
+      }
     });
     web.setWebChromeClient(new WebChromeClient() {
       @Override public void onPermissionRequest(PermissionRequest r) { main.post(() -> r.grant(r.getResources())); }
@@ -582,6 +589,76 @@ public class MainActivity extends ComponentActivity {
     } catch (Throwable e) {}
   }
   @Override protected void onActivityResult(int rc, int res, android.content.Intent data) { super.onActivityResult(rc, res, data); if (rc == 900) emit("auth", J("id", authReqId, "ok", res == RESULT_OK)); }
+  // 1.0.13: fingerprint / PIN verification. BiometricPrompt (BIOMETRIC_STRONG | DEVICE_CREDENTIAL) is the main gate; KeyguardManager is the fallback.
+  void authBiometric(int id, String reason) {
+    final String sub = reason == null || reason.isEmpty() ? "Verify it's you" : reason;
+    try {
+      int allowed = androidx.biometric.BiometricManager.Authenticators.BIOMETRIC_STRONG | androidx.biometric.BiometricManager.Authenticators.DEVICE_CREDENTIAL;
+      androidx.biometric.BiometricManager bm = androidx.biometric.BiometricManager.from(this);
+      int can = bm.canAuthenticate(allowed);
+      if (can == androidx.biometric.BiometricManager.BIOMETRIC_ERROR_NONE_ENROLLED || can == androidx.biometric.BiometricManager.BIOMETRIC_ERROR_NO_HARDWARE || can == androidx.biometric.BiometricManager.BIOMETRIC_ERROR_HW_UNAVAILABLE) { kgAuth(id, sub); return; }
+      if (can != androidx.biometric.BiometricManager.BIOMETRIC_SUCCESS) { kgAuth(id, sub); return; }
+      androidx.biometric.BiometricPrompt bp = new androidx.biometric.BiometricPrompt(this, ContextCompat.getMainExecutor(this), new androidx.biometric.BiometricPrompt.AuthenticationCallback() {
+        @Override public void onAuthenticationSucceeded(androidx.biometric.BiometricPrompt.AuthenticationResult result) { emit("auth", J("id", id, "ok", true)); }
+        @Override public void onAuthenticationError(int code, CharSequence msg) { boolean nolock = code == androidx.biometric.BiometricPrompt.ERROR_NO_DEVICE_CREDENTIAL; emit("auth", J("id", id, "ok", false, "nolock", nolock, "error", String.valueOf(msg))); }
+      });   // onAuthenticationFailed (one bad finger) leaves the prompt open; we only answer on success / error / cancel
+      androidx.biometric.BiometricPrompt.PromptInfo info = new androidx.biometric.BiometricPrompt.PromptInfo.Builder().setTitle("Mini Gibson").setSubtitle(sub).setAllowedAuthenticators(allowed).build();
+      bp.authenticate(info);
+    } catch (Throwable e) { kgAuth(id, sub); }
+  }
+  void kgAuth(int id, String reason) {
+    try { android.app.KeyguardManager km = (android.app.KeyguardManager) getSystemService(KEYGUARD_SERVICE);
+      if (km == null || !km.isDeviceSecure()) { emit("auth", J("id", id, "ok", false, "nolock", true, "error", "no device lock set")); return; }
+      android.content.Intent i = km.createConfirmDeviceCredentialIntent("Mini Gibson", reason);
+      if (i == null) { emit("auth", J("id", id, "ok", false, "error", "unavailable")); return; }
+      authReqId = id; startActivityForResult(i, 900);
+    } catch (Throwable e) { emit("auth", J("id", id, "ok", false, "error", String.valueOf(e))); }
+  }
+  // 1.0.13: a single fresh GPS fix on demand (not continuous), reverse-geocoded on the phone with the free built-in Geocoder.
+  void locate(int id) {
+    try {
+      if (ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED
+          && ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_COARSE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
+        main.post(() -> requestPermissions(new String[]{ Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION }, 9));
+        emit("loc", J("id", id, "ok", false, "error", "need location permission")); return;
+      }
+      android.location.LocationManager lm = (android.location.LocationManager) getSystemService(LOCATION_SERVICE);
+      if (lm == null) { emit("loc", J("id", id, "ok", false, "error", "no location service")); return; }
+      boolean gps = lm.isProviderEnabled(android.location.LocationManager.GPS_PROVIDER);
+      boolean net = lm.isProviderEnabled(android.location.LocationManager.NETWORK_PROVIDER);
+      if (!gps && !net) { emit("loc", J("id", id, "ok", false, "error", "location turned off")); return; }
+      final android.location.Location[] out = { null }; final java.util.concurrent.CountDownLatch latch = new java.util.concurrent.CountDownLatch(1);
+      String prov = gps ? android.location.LocationManager.GPS_PROVIDER : android.location.LocationManager.NETWORK_PROVIDER;
+      try {
+        if (android.os.Build.VERSION.SDK_INT >= 30) { lm.getCurrentLocation(prov, null, httpExec, loc -> { out[0] = loc; latch.countDown(); }); latch.await(12, java.util.concurrent.TimeUnit.SECONDS); }
+      } catch (Throwable e) {}
+      if (out[0] == null) { android.location.Location g = gps ? lm.getLastKnownLocation(android.location.LocationManager.GPS_PROVIDER) : null; android.location.Location nn = net ? lm.getLastKnownLocation(android.location.LocationManager.NETWORK_PROVIDER) : null; out[0] = g != null ? g : nn; }
+      if (out[0] == null) { emit("loc", J("id", id, "ok", false, "error", "no fix yet")); return; }
+      emitLoc(id, out[0]);
+    } catch (Throwable e) { emit("loc", J("id", id, "ok", false, "error", String.valueOf(e))); }
+  }
+  void emitLoc(int id, android.location.Location loc) {
+    double lat = loc.getLatitude(), lng = loc.getLongitude(); String street = "", city = "", area = "", landmark = "";
+    try { android.location.Geocoder gc = new android.location.Geocoder(this, java.util.Locale.getDefault());
+      java.util.List<android.location.Address> as = gc.getFromLocation(lat, lng, 1);
+      if (as != null && !as.isEmpty()) { android.location.Address a = as.get(0);
+        String thor = a.getThoroughfare(), sub = a.getSubThoroughfare();
+        street = ((sub != null ? sub + " " : "") + (thor != null ? thor : "")).trim();
+        city = a.getLocality() != null ? a.getLocality() : (a.getSubAdminArea() != null ? a.getSubAdminArea() : (a.getAdminArea() != null ? a.getAdminArea() : ""));
+        area = a.getSubLocality() != null ? a.getSubLocality() : "";
+        String fn = a.getPremises() != null ? a.getPremises() : a.getFeatureName();
+        if (fn != null && !fn.equalsIgnoreCase(sub) && !fn.equalsIgnoreCase(thor) && !fn.matches(".*\\d.*")) landmark = fn;
+      }
+    } catch (Throwable e) {}
+    emit("loc", J("id", id, "ok", true, "lat", lat, "lng", lng, "acc", Math.round(loc.getAccuracy()), "street", street, "city", city, "area", area, "landmark", landmark));
+  }
+  void openMap(double lat, double lng, String label) {
+    try { String q = lat + "," + lng + (label != null && !label.isEmpty() ? "(" + android.net.Uri.encode(label) + ")" : "");
+      android.content.Intent i = new android.content.Intent(android.content.Intent.ACTION_VIEW, android.net.Uri.parse("geo:" + lat + "," + lng + "?q=" + q)).addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK);
+      if (i.resolveActivity(getPackageManager()) != null) startActivity(i);
+      else startActivity(new android.content.Intent(android.content.Intent.ACTION_VIEW, android.net.Uri.parse("https://www.google.com/maps?q=" + lat + "," + lng)).addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK));
+    } catch (Throwable e) {}
+  }
   void focusCenter() {   // tap-to-focus at the centre; front cameras are often fixed-focus, so this may be a no-op
     try {
       if (camera == null) return;
@@ -803,7 +880,7 @@ public class MainActivity extends ComponentActivity {
 
   // ------------------------------------------------------------------ JS bridge
   class Bridge {
-    @JavascriptInterface public String info() { return J("app", "1.0.12", "cores", Runtime.getRuntime().availableProcessors(), "model", "kokoro-int8-multi-lang-v1_0").toString(); }
+    @JavascriptInterface public String info() { return J("app", "1.0.13", "cores", Runtime.getRuntime().availableProcessors(), "model", "kokoro-int8-multi-lang-v1_0").toString(); }
     @JavascriptInterface public void ttsInit() { ttsExec.execute(MainActivity.this::ttsLoad); }
     @JavascriptInterface public void tts(int id, String text, int sid, float speed) { ttsExec.execute(() -> { if (tts == null) ttsLoad(); ttsGen(id, text, sid, speed); }); }
     @JavascriptInterface public void srStart(String lang, boolean continuous, boolean quiet) {
@@ -908,13 +985,9 @@ public class MainActivity extends ComponentActivity {
       } catch (Throwable e) {}
       return arr.toString();
     }
-    @JavascriptInterface public void authBiometric(int id, String reason) { main.post(() -> {
-      try { android.app.KeyguardManager km = (android.app.KeyguardManager) getSystemService(KEYGUARD_SERVICE);
-        if (km == null || !km.isDeviceSecure()) { emit("auth", J("id", id, "ok", false, "error", "no device lock set")); return; }
-        android.content.Intent i = km.createConfirmDeviceCredentialIntent("Mini Gibson", reason == null || reason.isEmpty() ? "Verify it's you" : reason);
-        if (i == null) { emit("auth", J("id", id, "ok", false, "error", "unavailable")); return; }
-        authReqId = id; startActivityForResult(i, 900);
-      } catch (Throwable e) { emit("auth", J("id", id, "ok", false, "error", String.valueOf(e))); } }); }
+    @JavascriptInterface public void authBiometric(int id, String reason) { main.post(() -> MainActivity.this.authBiometric(id, reason)); }
+    @JavascriptInterface public void locate(int id) { httpExec.execute(() -> MainActivity.this.locate(id)); }
+    @JavascriptInterface public void openMap(double lat, double lng, String label) { main.post(() -> MainActivity.this.openMap(lat, lng, label)); }
     @JavascriptInterface public void exit() { main.post(MainActivity.this::finish); }
   }
 }

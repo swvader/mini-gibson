@@ -30,6 +30,7 @@
     else if (type === 'chat') { const f = chats.get(d.id); if (f) { chats.delete(d.id); f(d); } }
     else if (type === 'faceshot') { const f = faceReqs.get(d.id); if (f) { faceReqs.delete(d.id); f(d); } }
     else if (type === 'auth') { const f = auths.get(d.id); if (f) { auths.delete(d.id); f(d); } }
+    else if (type === 'loc') { const f = locs.get(d.id); if (f) { locs.delete(d.id); f(d); } }
     else if (type === 'call') { if (window.GibsonApp && GibsonApp.onCall) GibsonApp.onCall(d); }
     else if (type === 'sms') { if (window.GibsonApp && GibsonApp.onSms) GibsonApp.onSms(d); }
     else if (type === 'http') { const f = https.get(d.id); if (f) f(d); }
@@ -177,12 +178,20 @@
   const faceReqs = new Map(); let faceSeq = 0;
   window.GibsonFaceShot = N.faceShot ? enroll => new Promise(res => { const id = ++faceSeq; const t = setTimeout(() => { if (faceReqs.has(id)) { faceReqs.delete(id); res({ error: 'timeout' }); } }, 9000); faceReqs.set(id, d => { clearTimeout(t); res(d); }); N.faceShot(id, !!enroll); }) : null;
   const auths = new Map(); let authSeq = 0;
-  window.GibsonAuth = N.authBiometric ? reason => new Promise(res => { const id = ++authSeq; const t = setTimeout(() => { if (auths.has(id)) { auths.delete(id); res(false); } }, 60000); auths.set(id, d => { clearTimeout(t); res(!!d.ok); }); N.authBiometric(id, String(reason || '')); }) : null;
+  window.GibsonAuth = N.authBiometric ? reason => new Promise(res => {
+    const id = ++authSeq;
+    const t = setTimeout(() => { if (auths.has(id)) { auths.delete(id); res({ ok: false, error: 'timeout' }); } }, 300000);   // the prompt stays open until the user acts; only a long safety net
+    auths.set(id, d => { clearTimeout(t); res({ ok: !!d.ok, nolock: !!d.nolock, error: d.error || '' }); });
+    N.authBiometric(id, String(reason || ''));
+  }) : null;
   window.GibsonWifi = N.wifiSsid ? () => { try { return N.wifiSsid() || ''; } catch (e) { return ''; } } : null;
   window.GibsonContacts = N.contacts ? q => { try { return JSON.parse(N.contacts(String(q || ''))); } catch (e) { return []; } } : null;
   window.GibsonSendSms = N.sendSms ? (num, txt) => { try { return N.sendSms(String(num), String(txt)); } catch (e) { return String(e.message || e); } } : null;
   window.GibsonCall = N.call ? num => { try { N.call(String(num)); } catch (e) {} } : null;
   window.GibsonRecentTexts = N.recentTexts ? n => { try { return JSON.parse(N.recentTexts(n || 5)); } catch (e) { return []; } } : null;
+  const locs = new Map(); let locSeq = 0;
+  window.GibsonLocate = N.locate ? () => new Promise(res => { const id = ++locSeq; const t = setTimeout(() => { if (locs.has(id)) { locs.delete(id); res({ ok: false, error: 'timeout' }); } }, 16000); locs.set(id, d => { clearTimeout(t); res(d); }); N.locate(id); }) : null;
+  window.GibsonOpenMap = N.openMap ? (lat, lng, label) => { try { N.openMap(Number(lat), Number(lng), String(label || '')); } catch (e) {} } : null;
   window.GibsonCamBack = () => opt.camDefault === 'back';   // Settings: default camera (back = phone outside the case, e.g. car mount)
   window.GibsonSnap = back => new Promise(res => {
     const id = ++snapId; snaps.set(id, res); if (back && N.snapBack) N.snapBack(id); else N.snap(id);

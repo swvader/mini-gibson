@@ -3,7 +3,7 @@
 'use strict';
 const G = window.Gibson;
 const $ = s => document.querySelector(s);
-const VERSION = '1.8.0';
+const VERSION = '1.9.0';
 
 // ------------------------------------------------------------------ settings (localStorage only, on this phone)
 const LS = 'gibson.app.v1';
@@ -657,27 +657,34 @@ function wavFloat(buf) {
 function currentSsid() { try { return (window.GibsonWifi && window.GibsonWifi()) || ''; } catch (e) { return ''; } }
 const normNet = x => String(x || '').replace(/^"|"$/g, '').trim().toLowerCase();
 const Chatter = {
-  name: 'Chatterbox', backend: 'clone (Cereal C)', state: 'ready', lastMs: null, lastFallback: '', reachOk: null, reachAt: 0, reachNet: '',
-  home() { return (S.chatHome || '').trim().replace(/\/+$/, ''); },
-  away() { return (S.chatAway || '').trim().replace(/\/+$/, ''); },
+  name: 'Chatterbox', backend: 'clone (Cereal C)', state: 'ready', lastMs: null, lastFallback: '', reachOk: null, reachAt: 0, reachNet: '', lastErr: '', lastAddr: '', warmNet: '',
+  norm(a) { a = String(a || '').trim().replace(/\s+/g, '').replace(/\/+$/, ''); if (!a) return ''; if (!/^https?:\/\//i.test(a)) a = 'http://' + a; return a; },   // accept "192.168.1.9:8004" (add http://), strip spaces + trailing slashes
+  home() { return this.norm(S.chatHome); },
+  away() { return this.norm(S.chatAway); },
   net() { const ssid = normNet(currentSsid()); return ssid || (navigator.onLine === false ? 'offline' : 'data'); },
   onHome() { const ssid = normNet(currentSsid()); return !!(ssid && S.chatSsid && ssid === normNet(S.chatSsid)); },
   addr() { return this.onHome() ? (this.home() || this.away()) : (this.away() || this.home()); },   // other Wi-Fi / hotspot / mobile data -> Away (Tailscale)
   configured() { return !!(this.home() || this.away()); },
   why() { if (!this.configured()) return 'no Chatterbox address set'; if (!this.addr()) return 'no address for this network'; if (navigator.onLine === false) return 'no internet'; if (this.reachOk === false && this.reachNet === this.net()) return 'PC not reachable'; return ''; },
   usable() { return !this.why(); },
-  async reach(force) {
+  async reach(force, ms) {
     const net = this.net(); if (!force && this.reachOk != null && this.reachNet === net && Date.now() - this.reachAt < 60000) return this.reachOk;
-    const addr = this.addr(); this.reachNet = net; this.reachAt = Date.now();
-    if (!addr) { this.reachOk = false; showVoiceState(); return false; }
+    const addr = this.addr(); this.reachNet = net; this.reachAt = Date.now(); this.lastErr = ''; this.lastAddr = addr || '(no address)';
+    if (!addr) { this.reachOk = false; this.lastErr = 'no address for this network'; showVoiceState(); return false; }
     let ok = false;
-    try { const ac = new AbortController(), t = setTimeout(() => ac.abort(), 3000); try { const r = await brainFetch(addr + '/', { method: 'GET', signal: ac.signal }); ok = !!(r && (r.ok || r.status > 0)); } finally { clearTimeout(t); } } catch (e) { ok = false; }
-    this.reachOk = ok; Log && Log.add && Log.add('voice', 'Chatterbox ' + (this.onHome() ? 'home' : 'away') + ' ' + addr + ': ' + (ok ? 'reachable' : 'not reachable')); showVoiceState(); return ok;
+    try { const ac = new AbortController(), t = setTimeout(() => ac.abort(), ms || 3000); try { const r = await brainFetch(addr + '/', { method: 'GET', signal: ac.signal }); ok = !!(r && (r.ok || r.status > 0)); if (!ok) this.lastErr = 'no response'; } finally { clearTimeout(t); } } catch (e) { ok = false; this.lastErr = /abort/i.test(e.name || '') ? 'timed out' : (e.message || String(e)); }
+    this.reachOk = ok; Log && Log.add && Log.add('voice', 'Chatterbox ' + (this.onHome() ? 'home' : 'away') + ' ' + addr + ': ' + (ok ? 'reachable' : 'not reachable' + (this.lastErr ? ' (' + this.lastErr + ')' : ''))); showVoiceState();
+    if (ok) this.warm(); return ok;
   },
   body(text, speed) {
     return JSON.stringify({ text, voice_mode: 'clone', reference_audio_filename: (S.chatRef || 'cereal-c.wav'), output_format: 'wav', split_text: false, chunk_size: 120, temperature: 0.75, seed: 42, speed_factor: speed && Math.abs(speed - 1) > .01 ? Math.max(.5, Math.min(1.5, speed)) : 1.0, language: 'en', stream: true });
   },
-  async gen(text, voice, speed) {
+  // ONE /tts request at a time: the PC GPU slows badly (23 -> 8 it/s) if two run together, so each request queues behind the last
+  _chain: Promise.resolve(),
+  gen(text, voice, speed) { const run = () => this._gen(text, voice, speed); const pr = this._chain.then(run, run); this._chain = pr.catch(() => {}); return pr; },
+  // warm-up: one short request on app open / when the network changes so the FIRST real reply isn't the slow cold one (audio discarded)
+  warm() { const net = this.net(); if (this.warmNet === net || !this.usable()) return; this.warmNet = net; this.gen('Ready.', null, 1).catch(() => { this.warmNet = ''; }); },
+  async _gen(text, voice, speed) {
     const addr = this.addr(); if (!addr) throw new Error('no Chatterbox address');
     const url = addr + '/tts', body = this.body(text, speed), firstMs = Math.max(4000, S.chatFirstMs || 25000), t0 = performance.now();
     let res;
@@ -1373,6 +1380,7 @@ function startCommand(fromWake, auto) {
   const micWasOpen = !!Wake.stream || Wake.opening;
   stopSpeech(); Wake.pause(); stopRec(); clearTimeout(backTimer); clearTimeout(wakeTimer);
   Convo.enter(); if (!auto) Convo.idleSince = Date.now();
+  if (fromWake && typeof Loc !== 'undefined') Loc.refresh();          // fresh GPS fix on each wake (not continuous), ready if he's asked "where are we"
   setBusy('listening'); G.listen(true); $('#mic').classList.add('on'); Head.lookAt(0, -0.1);
   // the recognizer needs the mic: the wake detector's mic is closed above; give Android a moment to release it
   const go = () => { if (my === reqId && busy === 'listening') runCommand(my, { verify, auto: !!auto }); };
@@ -1468,7 +1476,7 @@ const Wake = {
     if (this.loading) return this.loading;
     this.loading = new Promise((res, rej) => {
       const w = this.worker = new Worker('wake/wake-worker.js');
-      const to = setTimeout(() => rej(new Error('wake model load timeout')), 45000);
+      const to = setTimeout(() => rej(new Error('wake model load timeout')), 90000);
       w.onmessage = e => {
         const m = e.data;
         if (m.type === 'ready') { clearTimeout(to); this.ready = true; w.postMessage({ type: 'threshold', v: wakeTh() }); res(); }
@@ -1740,7 +1748,12 @@ function bindSettings() {
     else if (b.id === 'exportData') G12.exportData();
     else if (b.id === 'importBtn') { const box = $('#importBox'); if (box.style.display === 'none') { box.style.display = 'block'; box.focus(); } else if (box.value.trim()) { G12.importData(box.value.trim()); box.value = ''; box.style.display = 'none'; } }
     else if (b.id === 'pickSsid') { const ssid = currentSsid(); if (ssid) { S.chatSsid = ssid; save(); $('#chatSsid').value = ssid; $('#ssidNow').textContent = 'now: ' + ssid; } else $('#ssidNow').textContent = 'Wi-Fi name not available (need location permission, or not on Wi-Fi)'; }
-    else if (b.id === 'chatTest') { $('#chatState').textContent = 'testing…'; AudioOut.init(); Chatter.reach(true).then(ok => { $('#chatState').textContent = ok ? 'reachable — speaking a test line' : 'not reachable (' + (Chatter.why() || 'no answer') + ')'; if (ok) { stopSpeech(); const sp = Speech(null, { force: 'chatter' }); sp.push('System online. Chatterbox clone reporting in.'); sp.end(); } }); }
+    else if (b.id === 'chatTest') {
+      const addr = Chatter.addr() || '(no address set)';
+      $('#chatState').textContent = 'testing ' + addr + ' …'; AudioOut.init();
+      Chatter.reach(true, 10000).then(ok => ok || new Promise(res => setTimeout(() => Chatter.reach(true, 10000).then(res), 400)))   // ~10 s, retry once
+        .then(ok => { if (ok) { $('#chatState').textContent = 'reachable (' + Chatter.lastAddr + ') — speaking a test line'; stopSpeech(); const sp = Speech(null, { force: 'chatter' }); sp.push('System online. Chatterbox clone reporting in.'); sp.end(); } else $('#chatState').textContent = 'not reachable — tried ' + Chatter.lastAddr + ' (' + (Chatter.lastErr || Chatter.why() || 'no answer') + ')'; });
+    }
     else if (b.dataset.delMem != null) { (S.memory || []).splice(+b.dataset.delMem, 1); save(); renderLists(); }
     else if (b.dataset.delAlarm != null) { const a = Alarms.list()[+b.dataset.delAlarm]; if (a) Alarms.cancel(a); renderLists(); }
     else if (b.dataset.delPerson != null) { (S.people || []).splice(+b.dataset.delPerson, 1); save(); G12.renderPeople(); }
@@ -1782,14 +1795,17 @@ function bindSettings() {
     else if (el.id === 'passphrase') S.passphrase = el.value;
     else if (el.id === 'location') S.location = el.value.trim();
     else if (el.id === 'proactive') S.proactive = el.checked;
-    else if (el.id === 'chatHome') { S.chatHome = el.value.trim(); Chatter.reachOk = null; if (started) ensureVoices(); }
-    else if (el.id === 'chatAway') { S.chatAway = el.value.trim(); Chatter.reachOk = null; }
+    else if (el.id === 'chatHome') { S.chatHome = el.value; Chatter.reachOk = null; }   // reach test runs on blur/Save/Test, not on every keystroke (was spamming the log)
+    else if (el.id === 'chatAway') { S.chatAway = el.value; Chatter.reachOk = null; }
     else if (el.id === 'chatSsid') { S.chatSsid = el.value.trim(); Chatter.reachOk = null; }
     else if (el.id === 'chatRef') S.chatRef = el.value.trim() || 'cereal-c.wav';
     else if (el.id === 'chatFirstMs') { S.chatFirstMs = +el.value; $('#chatFirstV').textContent = Math.round(S.chatFirstMs / 1000) + ' s'; }
     else return;
     save(); applyDisplay();
     if (['eVoice', 'nVoice', 'primary', 'rate', 'pitch', 'head', 'wake', 'wakeSens', 'convoTimeout', 'endPause', 'wakeEngine', 'vEngine', 'nDevice', 'pVoice'].includes(el.id) || el.dataset.key) syncUI();
+  });
+  $('#settings').addEventListener('change', e => {   // blur / commit: run the Chatterbox reach test once (not per keystroke)
+    if (['chatHome', 'chatAway', 'chatSsid'].includes(e.target.id)) { save(); Chatter.reachOk = null; if (started && S.vEngine === 'chatter') Chatter.reach(true, 6000); }
   });
   $('#settings').addEventListener('click', async e => {
     const b = e.target.closest('button'); if (!b) return;
@@ -1873,18 +1889,44 @@ async function identifyFace(crop) {
   return null;
 }
 
+// --- location: a fresh GPS fix on demand (and refreshed on each wake), reverse-geocoded on the phone (no paid API)
+const Loc = {
+  last: null, lastAt: 0, pending: null,
+  async refresh(force) {
+    if (!window.GibsonLocate) return null;
+    if (this.pending) return this.pending;
+    if (!force && this.last && this.last.ok && Date.now() - this.lastAt < 45000) return this.last;
+    const pr = (async () => { let r = null; try { r = await window.GibsonLocate(); } catch (e) {} if (r && r.ok && r.lat != null) { this.last = r; this.lastAt = Date.now(); } this.pending = null; return r; })();
+    this.pending = pr; return pr;
+  },
+  async get() { if (this.last && this.last.ok && Date.now() - this.lastAt < 45000) return this.last; return await this.refresh(true); }
+};
+window.addEventListener('online', () => { if (typeof Chatter !== 'undefined') { Chatter.reachOk = null; if (S.vEngine === 'chatter') Chatter.reach(true); } });
+
 // --- creator / security
 function securityOn() { return !!(S.creatorCode || S.passphrase || (S.people || []).some(p => p.role === 'creator')); }
 function isCreatorNow() { return !!(lastWho && lastWho.role === 'creator' && Date.now() - lastWho.t < 90000); }
-let awaitPass = null;
+let awaitPass = null, unlockUntil = 0;
+function creatorUnlocked() { return Date.now() < unlockUntil; }
+function unlock() { unlockUntil = Date.now() + 1800000; }   // stay unlocked for 30 min after a verified use
+function noLockWarn() { if (noLockWarn.done) return; noLockWarn.done = true; status('This phone has no screen lock — set a PIN + fingerprint in phone Settings so Gibson can really guard texts, calls and messages.'); }
 function askPassphrase() {
   return new Promise(resolve => { awaitPass = resolve; speakOut("What's the passphrase?", null).then(() => startCommand(false, true)); setTimeout(() => { if (awaitPass === resolve) { awaitPass = null; resolve(false); } }, 15000); });
 }
-async function verifyCreator() {
+// Main gate: the phone's fingerprint unlock (PIN/pattern as the built-in backup). We WAIT for the real result (no early give-up).
+// Once verified, Gibson stays unlocked for 30 minutes. The spoken passphrase is only a last resort when the phone has no screen lock.
+async function verifyCreator(force) {
   if (!securityOn()) return true;
-  if (isCreatorNow()) return true;
-  if (window.GibsonAuth) { try { if (await window.GibsonAuth('Verify you are ' + (S.creatorName || 'the owner'))) return true; } catch (e) {} }
-  if (S.passphrase) { const said = await askPassphrase(); if (said && norm(said).includes(norm(S.passphrase))) return true; }
+  if (!force && creatorUnlocked()) return true;
+  if (!force && isCreatorNow()) { unlock(); return true; }          // a recent face match counts as extra
+  if (window.GibsonAuth) {
+    let r = null; try { r = await window.GibsonAuth('Verify you are ' + (S.creatorName || 'the owner')); } catch (e) {}
+    if (r && r.ok) { unlock(); return true; }
+    if (r && r.nolock) noLockWarn();                                 // no screen lock: warn, then allow the passphrase below
+    else if (r) return false;                                        // phone has a lock and the prompt said no: that's final
+  }
+  if (S.passphrase) { const said = await askPassphrase(); if (said && norm(said).includes(norm(S.passphrase))) { unlock(); return true; } }
+  if (!window.GibsonAuth && !S.passphrase) noLockWarn();
   return false;
 }
 function denyLine() { const c = S.creatorCode || S.creatorName || 'the owner'; return pick(['[skeptical] Access denied, man. Root privileges belong to ' + c + '.', "[mischievous] Nice try. That console's locked to " + c + ' only.', '[neutral] Can\'t do that for you. Only ' + c + ' has the keys to that one.']); }
@@ -2070,6 +2112,29 @@ async function intercept(raw) {
   // sleep / wake
   if (/\b(stop listening|go to sleep|goodnight gibson|power down|that'?s all for now|sleep mode)\b/.test(n) || /^(sleep|go to sleep)$/.test(n)) { asleep = true; Convo.exit(); sayLine('[sleepy] Going quiet. Just say Hey Gibson when you want me.', 'sleepy'); return true; }
   if (/\b(quiet mode|do not disturb|don'?t talk first|no check ?ins?)\b/.test(n)) { S.quietUntil = Date.now() + 3600e3; save(); sayLine('[neutral] Quiet mode on for an hour. I won\'t pipe up on my own.'); return true; }
+  // verify / unlock on request
+  if (/\b(verify me|unlock(?: me| yourself)?|authenticate me|log me in|prove it'?s me)\b/.test(n)) {
+    if (!securityOn()) return sayLine('[neutral] Nothing to unlock, man — no creator set. Add one in settings if you want me guarding things.'), true;
+    sayLine('[curious] Hold up — finger on the sensor.');
+    const ok = await verifyCreator(true);
+    return sayLine(ok ? '[happy] Verified. You\'ve got root for the next half hour, ' + (S.creatorName || 'man') + '.' : '[skeptical] Couldn\'t verify you. Still locked down.', ok ? 'happy' : 'skeptical'), true;
+  }
+  // where am I / show me on a map (fresh GPS, honest if there's no fix)
+  if (/\b(where (?:am i|are we|r we)|what'?s my location|what is my location|where is this place|our (?:current )?location)\b/.test(n)) {
+    if (!window.GibsonLocate) return false;
+    sayLine('[curious] Getting a fresh fix…');
+    const r = await Loc.get();
+    if (!r || !r.ok || r.lat == null) return sayLine('[sad] No GPS fix right now, and I won\'t guess. Get near a window and make sure location\'s allowed for me.'), true;
+    const where = [r.street, r.city].filter(Boolean).join(', ').trim();
+    return sayLine('[happy] ' + (where ? 'We\'re near ' + where + '.' : 'I\'ve got a fix but no street name on it.') + (r.landmark ? ' Close to ' + r.landmark + '.' : ''), 'happy'), true;
+  }
+  if (/\b(show me (?:on (?:a|the) map|where we are)|on the map|open (?:the )?maps?|pull (?:it |up )?(?:the )?map|map it)\b/.test(n)) {
+    if (!window.GibsonOpenMap) return false;
+    const r = (Loc.last && Loc.last.ok) ? Loc.last : await Loc.get();
+    if (!r || !r.ok || r.lat == null) return sayLine('[sad] I don\'t have a fix to show yet, man.'), true;
+    window.GibsonOpenMap(r.lat, r.lng, [r.street, r.city].filter(Boolean).join(', '));
+    return sayLine('[mischievous] Pulling it up on the map.'), true;
+  }
   // mainframe inbox
   let m;
   if ((m = t.match(/^(?:send (?:this|that)|tell|note|save (?:this|that))?\s*(?:to )?(?:the )?mainframe[:,\- ]+(.+)$/i)) || (m = t.match(/^(?:check|anything) (?:with )?(?:the )?mainframe$/i) && null)) {
