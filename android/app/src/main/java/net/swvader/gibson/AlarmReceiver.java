@@ -8,6 +8,8 @@ import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
 import android.os.Build;
+import android.content.SharedPreferences;
+import org.json.JSONObject;
 
 // 1.0.11: reminders + timers. AlarmManager fires this even with the app in the background; it posts a notification,
 // and if Gibson is open he also says it out loud (event "alarm" to the page).
@@ -24,7 +26,17 @@ public class AlarmReceiver extends BroadcastReceiver {
         .setCategory(Notification.CATEGORY_REMINDER).setDefaults(Notification.DEFAULT_ALL);
       nm.notify(id, b.build());
     } catch (Throwable e) {}
+    removeAlarm(c, id);   // it fired; don't re-schedule it on next boot
     MainActivity a = MainActivity.inst == null ? null : MainActivity.inst.get();
     if (a != null) a.emit("alarm", MainActivity.J("id", id, "title", title, "text", text));
+  }
+
+  // persistence so reminders survive a reboot (BootReceiver re-schedules what's still pending)
+  static SharedPreferences prefs(Context c) { return c.getSharedPreferences("gibson_alarms", Context.MODE_PRIVATE); }
+  static void saveAlarm(Context c, int id, long at, String title, String text) {
+    try { JSONObject all = new JSONObject(prefs(c).getString("a", "{}")); all.put(String.valueOf(id), new JSONObject().put("at", at).put("title", title == null ? "" : title).put("text", text == null ? "" : text)); prefs(c).edit().putString("a", all.toString()).apply(); } catch (Throwable e) {}
+  }
+  static void removeAlarm(Context c, int id) {
+    try { JSONObject all = new JSONObject(prefs(c).getString("a", "{}")); all.remove(String.valueOf(id)); prefs(c).edit().putString("a", all.toString()).apply(); } catch (Throwable e) {}
   }
 }

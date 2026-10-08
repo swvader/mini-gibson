@@ -93,6 +93,7 @@ public class MainActivity extends ComponentActivity {
   volatile String lastJpeg; volatile long lastJpegAt; volatile int camFrames; volatile String camErr = ""; int srRetry;
 
   static java.lang.ref.WeakReference<MainActivity> inst;
+  volatile int faceWanted; boolean faceWantedEnroll; int authReqId;
   @Override protected void onCreate(Bundle b) {
     inst = new java.lang.ref.WeakReference<>(this);
     super.onCreate(b);
@@ -130,6 +131,7 @@ public class MainActivity extends ComponentActivity {
       if (ContextCompat.checkSelfPermission(this, p) != PackageManager.PERMISSION_GRANTED) need.add(p);
     if (!need.isEmpty()) requestPermissions(need.toArray(new String[0]), 1);
     web.loadUrl("https://" + HOST + "/assets/web/index.html");
+    startPhoneWatch();
   }
   void immersive() {
     web.setSystemUiVisibility(View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY | View.SYSTEM_UI_FLAG_FULLSCREEN | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION | View.SYSTEM_UI_FLAG_LAYOUT_STABLE);
@@ -141,6 +143,7 @@ public class MainActivity extends ComponentActivity {
     super.onRequestPermissionsResult(c, p, g);
     for (Runnable r : new ArrayList<>(geoPending)) r.run(); geoPending.clear();
     emit("perm", J("location", hasLocation(), "mic", ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED));
+    startPhoneWatch();
   }
   @Override protected void onPause() { super.onPause(); srWanted = false; if (sr != null) sr.cancel(); unmute(); }
   @Override protected void onDestroy() { super.onDestroy(); if (phone != null) phone.shutdown(); if (sr != null) sr.destroy(); unmute(); if (tts != null) tts.release(); }
@@ -507,6 +510,78 @@ public class MainActivity extends ComponentActivity {
     android.content.Intent i = new android.content.Intent(this, AlarmReceiver.class).putExtra("id", id).putExtra("title", title).putExtra("text", text);
     return android.app.PendingIntent.getBroadcast(this, id, i, android.app.PendingIntent.FLAG_IMMUTABLE | android.app.PendingIntent.FLAG_UPDATE_CURRENT);
   }
+  // 1.0.12 helpers -----------------------------------------------------------------
+  double[] lumStats(Bitmap b) {
+    try { int sw = Math.min(b.getWidth(), 64), sh = Math.min(b.getHeight(), 64); Bitmap s = Bitmap.createScaledBitmap(b, Math.max(1, sw), Math.max(1, sh), false);
+      int n = s.getWidth() * s.getHeight(); int[] px = new int[n]; s.getPixels(px, 0, s.getWidth(), 0, 0, s.getWidth(), s.getHeight());
+      double sum = 0, sum2 = 0; for (int i = 0; i < n; i++) { int p = px[i]; double l = 0.299 * ((p >> 16) & 255) + 0.587 * ((p >> 8) & 255) + 0.114 * (p & 255); sum += l; sum2 += l * l; }
+      double m = sum / n; return new double[]{ m, Math.sqrt(Math.max(0, sum2 / n - m * m)) };
+    } catch (Throwable e) { return new double[]{ 128, 128 }; }
+  }
+  Bitmap rotateBmp(Bitmap b, int deg) { if (deg == 0) return b; Matrix m = new Matrix(); m.postRotate(deg); return Bitmap.createBitmap(b, 0, 0, b.getWidth(), b.getHeight(), m, true); }
+  void doFaceShot(int id, Bitmap bm, int rot) {
+    try {
+      if (faceDet == null) faceDet = FaceDetection.getClient(new FaceDetectorOptions.Builder().setPerformanceMode(FaceDetectorOptions.PERFORMANCE_MODE_FAST).setMinFaceSize(0.12f).build());
+      final Bitmap up = rotateBmp(bm, rot);
+      faceDet.process(InputImage.fromBitmap(up, 0)).addOnSuccessListener(faces -> {
+        String reason = "";
+        if (faces.isEmpty()) reason = "none"; else if (faces.size() > 1) reason = "many";
+        Face best = faces.isEmpty() ? null : faces.get(0);
+        if (best != null && reason.isEmpty()) {
+          Rect rc = best.getBoundingBox(); int W = up.getWidth(), H = up.getHeight();
+          float frac = (float) rc.width() / W, cx = rc.centerX() / (float) W, cy = rc.centerY() / (float) H;
+          if (frac < 0.18f) reason = "small";
+          else if (Math.abs(cx - 0.5f) > 0.32f || Math.abs(cy - 0.5f) > 0.38f) reason = "offcenter";
+          if (reason.isEmpty()) {
+            int m = (int) (rc.width() * 0.4f); int x0 = Math.max(0, rc.left - m), y0 = Math.max(0, rc.top - m), x1 = Math.min(W, rc.right + m), y1 = Math.min(H, rc.bottom + m);
+            Bitmap crop = Bitmap.createBitmap(up, x0, y0, Math.max(1, x1 - x0), Math.max(1, y1 - y0));
+            float sc = 320f / Math.max(crop.getWidth(), crop.getHeight()); if (sc < 1) { Matrix mm = new Matrix(); mm.postScale(sc, sc); crop = Bitmap.createBitmap(crop, 0, 0, crop.getWidth(), crop.getHeight(), mm, true); }
+            int cw = crop.getWidth(), ch = crop.getHeight(); int[] px = new int[cw * ch]; crop.getPixels(px, 0, cw, 0, 0, cw, ch);
+            double sharp = Sharp.laplacianVariance(px, cw, ch);
+            if (sharp < 30) reason = "blurry";
+            else { ByteArrayOutputStream bo = new ByteArrayOutputStream(); crop.compress(Bitmap.CompressFormat.JPEG, 82, bo); String b64 = Base64.encodeToString(bo.toByteArray(), Base64.NO_WRAP);
+              emit("faceshot", J("id", id, "ok", true, "b64", b64, "size", Math.round(frac * 100) / 100.0, "sharp", Math.round(sharp))); faceFinish(); return; }
+          }
+        }
+        emit("faceshot", J("id", id, "ok", false, "reason", reason.isEmpty() ? "none" : reason)); faceFinish();
+      }).addOnFailureListener(e -> { emit("faceshot", J("id", id, "ok", false, "reason", "error")); faceFinish(); });
+    } catch (Throwable e) { emit("faceshot", J("id", id, "ok", false, "reason", "error")); faceFinish(); }
+  }
+  void faceFinish() { main.post(() -> { try { if (faceOn || labelOn || shootMode > 0 || snapWanted > 0) return; camStop(); } catch (Throwable e) {} }); }
+  String readAll(java.io.InputStream in) throws Exception { if (in == null) return ""; ByteArrayOutputStream bo = new ByteArrayOutputStream(); byte[] b = new byte[4096]; int r; while ((r = in.read(b)) > 0) bo.write(b, 0, r); return new String(bo.toByteArray(), "UTF-8"); }
+  void chatTts(int id, String url, String body, int firstMs) {
+    java.net.HttpURLConnection c = null;
+    try {
+      c = (java.net.HttpURLConnection) new java.net.URL(url).openConnection();
+      c.setRequestMethod("POST"); c.setConnectTimeout(5000); c.setReadTimeout(Math.max(8000, firstMs) + 60000);
+      c.setRequestProperty("Content-Type", "application/json"); c.setRequestProperty("Accept", "audio/wav"); c.setDoOutput(true);
+      byte[] bb = body.getBytes("UTF-8"); OutputStream os = c.getOutputStream(); os.write(bb); os.close();
+      int st = c.getResponseCode();
+      if (st >= 400) { String err = ""; try { err = readAll(c.getErrorStream()); } catch (Exception e) {} emit("chat", J("id", id, "status", st, "err", err.substring(0, Math.min(200, err.length())))); return; }
+      long t0 = System.currentTimeMillis(); long first = -1; java.io.InputStream in = c.getInputStream(); ByteArrayOutputStream bo = new ByteArrayOutputStream(); byte[] buf = new byte[8192]; int rd;
+      while ((rd = in.read(buf)) > 0) { if (first < 0) first = System.currentTimeMillis() - t0; bo.write(buf, 0, rd); }
+      File d = new File(getCacheDir(), "tts"); d.mkdirs(); File f = new File(d, "chat" + (id % 8) + ".wav"); try (FileOutputStream o = new FileOutputStream(f)) { o.write(bo.toByteArray()); }
+      emit("chat", J("id", id, "status", st, "url", "https://" + HOST + "/tts/" + f.getName() + "?" + id, "first", first));
+    } catch (Exception e) { emit("chat", J("id", id, "error", String.valueOf(e))); } finally { if (c != null) c.disconnect(); }
+  }
+  String contactName(String number) {
+    try { if (number == null || number.isEmpty()) return null;
+      if (ContextCompat.checkSelfPermission(this, Manifest.permission.READ_CONTACTS) != PackageManager.PERMISSION_GRANTED) return null;
+      android.net.Uri u = android.net.Uri.withAppendedPath(android.provider.ContactsContract.PhoneLookup.CONTENT_FILTER_URI, android.net.Uri.encode(number));
+      android.database.Cursor c = getContentResolver().query(u, new String[]{ android.provider.ContactsContract.PhoneLookup.DISPLAY_NAME }, null, null, null);
+      String nm = null; if (c != null) { if (c.moveToFirst()) nm = c.getString(0); c.close(); } return nm;
+    } catch (Throwable e) { return null; }
+  }
+  void startPhoneWatch() {
+    try {
+      if (ContextCompat.checkSelfPermission(this, Manifest.permission.READ_PHONE_STATE) != PackageManager.PERMISSION_GRANTED) return;
+      android.telephony.TelephonyManager tm = (android.telephony.TelephonyManager) getSystemService(TELEPHONY_SERVICE);
+      tm.listen(new android.telephony.PhoneStateListener() {
+        @Override public void onCallStateChanged(int state, String number) { if (state == android.telephony.TelephonyManager.CALL_STATE_RINGING) emit("call", J("state", "ringing", "number", number == null ? "" : number, "name", contactName(number))); }
+      }, android.telephony.PhoneStateListener.LISTEN_CALL_STATE);
+    } catch (Throwable e) {}
+  }
+  @Override protected void onActivityResult(int rc, int res, android.content.Intent data) { super.onActivityResult(rc, res, data); if (rc == 900) emit("auth", J("id", authReqId, "ok", res == RESULT_OK)); }
   void focusCenter() {   // tap-to-focus at the centre; front cameras are often fixed-focus, so this may be a no-op
     try {
       if (camera == null) return;
@@ -622,6 +697,7 @@ public class MainActivity extends ComponentActivity {
       if (camHi) return;   // (label mode just ended; the low-res rebind is on its way)
       final int rot = img.getImageInfo().getRotationDegrees();
       long now = System.currentTimeMillis();
+      if (faceWanted > 0 && now - camStartedAt > 600) { int fid = faceWanted; faceWanted = 0; Bitmap fb = null; try { fb = img.toBitmap(); } catch (Throwable e) {} if (fb != null) doFaceShot(fid, fb, rot); else emit("faceshot", J("id", fid, "ok", false, "reason", "error")); return; }
       if (now - camStartedAt < 700 && snapWanted > 0) return;   // just switched on: give auto-exposure a moment (first frames are dark)
       boolean wantJpeg = snapWanted > 0 || now - lastJpegAt > 300;
       boolean wantFace = faceOn && !faceBusy && now - lastFaceSent >= 90;
@@ -633,7 +709,8 @@ public class MainActivity extends ComponentActivity {
         Bitmap out = Bitmap.createBitmap(bm, 0, 0, bm.getWidth(), bm.getHeight(), mx, true);
         ByteArrayOutputStream bo = new ByteArrayOutputStream(); out.compress(Bitmap.CompressFormat.JPEG, 70, bo);
         lastJpeg = Base64.encodeToString(bo.toByteArray(), Base64.NO_WRAP); lastJpegAt = now;
-        int id = snapWanted; if (id > 0) { snapWanted = 0; emit("snap", J("id", id, "b64", lastJpeg, "w", out.getWidth(), "h", out.getHeight(), "back", camBack));
+        double[] ls = lumStats(out);
+        int id = snapWanted; if (id > 0) { snapWanted = 0; emit("snap", J("id", id, "b64", lastJpeg, "w", out.getWidth(), "h", out.getHeight(), "back", camBack, "lum", Math.round(ls[0]), "varr", Math.round(ls[1])));
           if (backOnce) { backOnce = false; lastJpeg = null; main.post(() -> { try { if (camProvider == null || shootMode > 0 || labelOn) return; if (faceOn) bind(false, false); else camStop(); } catch (Exception e) { camErr = String.valueOf(e); } }); } }
       }
       if (wantFace) {
@@ -726,7 +803,7 @@ public class MainActivity extends ComponentActivity {
 
   // ------------------------------------------------------------------ JS bridge
   class Bridge {
-    @JavascriptInterface public String info() { return J("app", "1.0.11", "cores", Runtime.getRuntime().availableProcessors(), "model", "kokoro-int8-multi-lang-v1_0").toString(); }
+    @JavascriptInterface public String info() { return J("app", "1.0.12", "cores", Runtime.getRuntime().availableProcessors(), "model", "kokoro-int8-multi-lang-v1_0").toString(); }
     @JavascriptInterface public void ttsInit() { ttsExec.execute(MainActivity.this::ttsLoad); }
     @JavascriptInterface public void tts(int id, String text, int sid, float speed) { ttsExec.execute(() -> { if (tts == null) ttsLoad(); ttsGen(id, text, sid, speed); }); }
     @JavascriptInterface public void srStart(String lang, boolean continuous, boolean quiet) {
@@ -784,15 +861,60 @@ public class MainActivity extends ComponentActivity {
       boolean exact = android.os.Build.VERSION.SDK_INT < 31 || am.canScheduleExactAlarms();
       try { if (exact) am.setExactAndAllowWhileIdle(android.app.AlarmManager.RTC_WAKEUP, at, pi); else am.setAndAllowWhileIdle(android.app.AlarmManager.RTC_WAKEUP, at, pi); }
       catch (SecurityException e) { am.setAndAllowWhileIdle(android.app.AlarmManager.RTC_WAKEUP, at, pi); exact = false; }
+      AlarmReceiver.saveAlarm(MainActivity.this, id, at, title, text);   // persisted so a reboot can re-schedule it
       return exact ? "exact" : "inexact";
     }
-    @JavascriptInterface public void alarmCancel(int id) { ((android.app.AlarmManager) getSystemService(ALARM_SERVICE)).cancel(alarmPi(id, "", "")); }
+    @JavascriptInterface public void alarmCancel(int id) { ((android.app.AlarmManager) getSystemService(ALARM_SERVICE)).cancel(alarmPi(id, "", "")); AlarmReceiver.removeAlarm(MainActivity.this, id); }
     @JavascriptInterface public void shootText(String t) { main.post(() -> { if (shootLbl != null) shootLbl.setText(t); }); }
     @JavascriptInterface public void shootView(boolean on) { main.post(() -> { if (shootBox != null && shootMode > 0) showBox(on); }); }
     @JavascriptInterface public void shootEnd() { main.post(MainActivity.this::shootEnd); }
     @JavascriptInterface public void takePhoto(int id) { main.post(() -> MainActivity.this.takePhoto(id)); }
     @JavascriptInterface public void recStart(int id, int maxSec) { main.post(() -> MainActivity.this.recStart(id, maxSec)); }
     @JavascriptInterface public void recStop() { main.post(() -> { if (recording != null) recording.stop(); }); }
+    @JavascriptInterface public void faceShot(int id, boolean enroll) { main.post(() -> {
+      if (ContextCompat.checkSelfPermission(MainActivity.this, Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) { emit("faceshot", J("id", id, "ok", false, "reason", "nocam")); return; }
+      faceWanted = id; faceWantedEnroll = enroll; if (camProvider == null) MainActivity.this.camStart(); else camStartedAt = Math.min(camStartedAt, System.currentTimeMillis() - 300);
+    }); }
+    @JavascriptInterface public void chatTts(int id, String url, String body, int firstMs) { httpExec.execute(() -> MainActivity.this.chatTts(id, url, body, firstMs)); }
+    @JavascriptInterface public String wifiSsid() {
+      try { android.net.wifi.WifiManager wm = (android.net.wifi.WifiManager) getApplicationContext().getSystemService(WIFI_SERVICE); android.net.wifi.WifiInfo wi = wm.getConnectionInfo(); if (wi == null) return ""; String s = wi.getSSID(); if (s == null) return ""; s = s.replace("\"", ""); return (s.isEmpty() || s.toLowerCase().contains("unknown ssid")) ? "" : s; } catch (Throwable e) { return ""; }
+    }
+    @JavascriptInterface public String contacts(String q) {
+      if (ContextCompat.checkSelfPermission(MainActivity.this, Manifest.permission.READ_CONTACTS) != PackageManager.PERMISSION_GRANTED) { main.post(() -> requestPermissions(new String[]{ Manifest.permission.READ_CONTACTS }, 5)); return "[]"; }
+      org.json.JSONArray arr = new org.json.JSONArray();
+      try { android.net.Uri uri = android.provider.ContactsContract.CommonDataKinds.Phone.CONTENT_URI; String sel = null; String[] args = null;
+        if (q != null && !q.trim().isEmpty()) { sel = android.provider.ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME + " LIKE ?"; args = new String[]{ "%" + q.trim() + "%" }; }
+        android.database.Cursor cur = getContentResolver().query(uri, new String[]{ android.provider.ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME, android.provider.ContactsContract.CommonDataKinds.Phone.NUMBER }, sel, args, android.provider.ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME + " ASC");
+        java.util.HashSet<String> seen = new java.util.HashSet<>();
+        if (cur != null) { while (cur.moveToNext() && arr.length() < 8) { String nm = cur.getString(0), num = cur.getString(1); if (nm == null || num == null) continue; String k = nm.toLowerCase(); if (seen.contains(k)) continue; seen.add(k); arr.put(new JSONObject().put("name", nm).put("number", num)); } cur.close(); }
+      } catch (Throwable e) {}
+      return arr.toString();
+    }
+    @JavascriptInterface public String sendSms(String number, String text) {
+      if (ContextCompat.checkSelfPermission(MainActivity.this, Manifest.permission.SEND_SMS) != PackageManager.PERMISSION_GRANTED) { main.post(() -> requestPermissions(new String[]{ Manifest.permission.SEND_SMS }, 6)); return "need SMS permission, I just asked, try again"; }
+      try { android.telephony.SmsManager sm = android.telephony.SmsManager.getDefault(); java.util.ArrayList<String> parts = sm.divideMessage(text); sm.sendMultipartTextMessage(number, null, parts, null, null); return "ok"; }
+      catch (Throwable e) { return String.valueOf(e.getMessage()); }
+    }
+    @JavascriptInterface public void call(String number) { main.post(() -> {
+      try { if (ContextCompat.checkSelfPermission(MainActivity.this, Manifest.permission.CALL_PHONE) != PackageManager.PERMISSION_GRANTED) { requestPermissions(new String[]{ Manifest.permission.CALL_PHONE }, 7); return; }
+        startActivity(new android.content.Intent(android.content.Intent.ACTION_CALL, android.net.Uri.parse("tel:" + number)).addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK));
+        try { ((AudioManager) getSystemService(AUDIO_SERVICE)).setSpeakerphoneOn(true); } catch (Throwable e) {}
+      } catch (Throwable e) { camErr = "call: " + e; } }); }
+    @JavascriptInterface public String recentTexts(int n) {
+      if (ContextCompat.checkSelfPermission(MainActivity.this, Manifest.permission.READ_SMS) != PackageManager.PERMISSION_GRANTED) { main.post(() -> requestPermissions(new String[]{ Manifest.permission.READ_SMS }, 8)); return "[]"; }
+      org.json.JSONArray arr = new org.json.JSONArray();
+      try { android.database.Cursor cur = getContentResolver().query(android.net.Uri.parse("content://sms/inbox"), new String[]{ "address", "body", "date" }, null, null, "date DESC");
+        if (cur != null) { int c = 0, max = Math.max(1, Math.min(10, n)); while (cur.moveToNext() && c < max) { String addr = cur.getString(0), body = cur.getString(1); arr.put(new JSONObject().put("from", addr == null ? "" : addr).put("name", contactName(addr)).put("body", body == null ? "" : body)); c++; } cur.close(); }
+      } catch (Throwable e) {}
+      return arr.toString();
+    }
+    @JavascriptInterface public void authBiometric(int id, String reason) { main.post(() -> {
+      try { android.app.KeyguardManager km = (android.app.KeyguardManager) getSystemService(KEYGUARD_SERVICE);
+        if (km == null || !km.isDeviceSecure()) { emit("auth", J("id", id, "ok", false, "error", "no device lock set")); return; }
+        android.content.Intent i = km.createConfirmDeviceCredentialIntent("Mini Gibson", reason == null || reason.isEmpty() ? "Verify it's you" : reason);
+        if (i == null) { emit("auth", J("id", id, "ok", false, "error", "unavailable")); return; }
+        authReqId = id; startActivityForResult(i, 900);
+      } catch (Throwable e) { emit("auth", J("id", id, "ok", false, "error", String.valueOf(e))); } }); }
     @JavascriptInterface public void exit() { main.post(MainActivity.this::finish); }
   }
 }
